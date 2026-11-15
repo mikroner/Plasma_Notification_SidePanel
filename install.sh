@@ -8,6 +8,8 @@
 #   ./install.sh update               update the widget only; your panel and settings are kept
 #   ./install.sh uninstall            remove the panel, the widget and the package
 #   ./install.sh test                 send sample notifications to try the panel out
+#   ./install.sh package              build com.user.sidenotifications-<version>.plasmoid, the file
+#                                     to attach to a GitHub release (the app updates from it)
 #
 # Options (for install):
 #   --edge  left|right|top|bottom     screen edge for the panel          (default: right)
@@ -19,10 +21,13 @@
 #   --recreate                        build the panel again from scratch, even if one exists
 #                                     (this resets its settings)
 #   --no-restart                      do not restart the Plasma shell after updating
+#   --repo  owner/name                GitHub repository the app checks for updates (stored as the
+#                                     default of that setting; or edit GITHUB_REPO below)
 
 set -euo pipefail
 
 ID="com.user.sidenotifications"
+GITHUB_REPO="mikroner/Plasma_Notification_SidePanel" # e.g. "yourname/side-notification-panel"; the app looks for releases here
 TMP=""
 PKG=""
 cleanup() { [[ -n $TMP ]] && rm -rf "$TMP"; return 0; }
@@ -53,8 +58,9 @@ while [[ $# -gt 0 ]]; do
         --length) LENGTH="${2:?--length needs a value}"; OPTS_GIVEN=1; shift 2 ;;
         --recreate) RECREATE=1; shift ;;
         --no-restart) RESTART=0; shift ;;
+        --repo)   GITHUB_REPO="${2:?--repo needs owner/name}"; shift 2 ;;
         -h|--help) usage; exit 0 ;;
-        install|update|uninstall|test) CMD="$1"; shift ;;
+        install|update|uninstall|test|package) CMD="$1"; shift ;;
         -*) usage >&2; die "Unknown option: $1" ;;
         *) usage >&2; die "Unknown command: $1" ;;
     esac
@@ -119,14 +125,14 @@ fi
 EDGE="${EDGE:-right}"
 MODE="${MODE:-handle}"
 
-case "$CMD" in install|update|uninstall|test) ;; *) usage >&2; die "Unknown command: $CMD" ;; esac
+case "$CMD" in install|update|uninstall|test|package) ;; *) usage >&2; die "Unknown command: $CMD" ;; esac
 case "$EDGE" in left|right|top|bottom) ;; *) die "--edge must be left, right, top or bottom" ;; esac
 case "$MODE" in handle|sidebar) ;; *) die "--mode must be handle or sidebar" ;; esac
 [[ $SCREEN =~ ^[0-9]+$ && $LENGTH =~ ^[0-9]+$ ]] || die "--screen and --length must be numbers"
 if [[ -z $SIZE ]]; then [[ $MODE == handle ]] && SIZE=20 || SIZE=360; fi
 [[ $SIZE =~ ^[0-9]+$ ]] || die "--size must be a number"
 
-command -v kpackagetool6 >/dev/null || die "kpackagetool6 not found. This installer is for KDE Plasma 6."
+[[ $CMD == package ]] || command -v kpackagetool6 >/dev/null || die "kpackagetool6 not found. This installer is for KDE Plasma 6."
 
 QDBUS=""
 for c in qdbus6 qdbus-qt6 qdbus; do
@@ -168,7 +174,7 @@ extract_package() {
         "Icon": "notification-active",
         "Category": "Utilities",
         "License": "GPL-2.0+",
-        "Version": "2.1.3",
+        "Version": "2.2.0",
         "Authors": [
             {
                 "Name": "You"
@@ -211,6 +217,25 @@ __SNP_EOF__
         <!-- internal: the stored history (JSON) -->
         <entry name="historyData" type="String">
             <default></default>
+        </entry>
+        <!-- updates from GitHub releases: "owner/repo" -->
+        <entry name="updateRepo" type="String">
+            <default>YOUR-GITHUB-USER/YOUR-REPO</default>
+        </entry>
+        <!-- look for a new release about once a day -->
+        <entry name="updateAuto" type="Bool">
+            <default>true</default>
+        </entry>
+        <!-- install a found update without asking (it still needs a Plasma restart) -->
+        <entry name="updateAutoInstall" type="Bool">
+            <default>false</default>
+        </entry>
+        <!-- internal: when the last automatic check ran (ms) and a counter the settings page raises for "Check now" -->
+        <entry name="updateLastCheck" type="Double">
+            <default>0</default>
+        </entry>
+        <entry name="updateCheckRequest" type="Int">
+            <default>0</default>
         </entry>
         <!-- internal: the release whose Readme was last shown automatically -->
         <entry name="seenVersion" type="String">
@@ -323,6 +348,11 @@ ConfigModel {
         icon: "preferences-desktop-color"
         source: "configHandle.qml"
     }
+    ConfigCategory {
+        name: i18n("Updates")
+        icon: "update-none"
+        source: "configUpdates.qml"
+    }
 }
 __SNP_EOF__
     mkdir -p "$PKG/contents/ui"
@@ -397,6 +427,11 @@ PlasmoidItem {
             checkable: true
             checked: root.dndActive
             onTriggered: root.setDnd(!root.dndActive, 0)
+        },
+        PlasmaCore.Action {
+            text: i18n("Check for updates")
+            icon.name: "update-none"
+            onTriggered: root.checkForUpdates(true)
         },
         PlasmaCore.Action {
             text: i18n("Clear All Notifications")
@@ -854,9 +889,75 @@ PlasmoidItem {
         onTriggered: root.scheduleDnd()
     }
 
+    // ---- updates from GitHub --------------------------------------------------
+    Loader {
+        id: updaterLoader
+        source: "Updater.qml"
+        onStatusChanged: {
+            if (status === Loader.Error) {
+                console.warn("Side Notification Panel: updates unavailable, the plasma5support QML module is missing")
+            }
+        }
+    }
+    readonly property var updater: updaterLoader.item
+    readonly property string updateState: updater ? updater.state : "idle"
+    property bool updateDismissed: false
+    property bool updateManual: false          // the check was asked for, so also report "up to date"
+
+    Binding { target: updaterLoader.item; property: "repo"; value: Plasmoid.configuration.updateRepo; when: updaterLoader.item !== null }
+    Binding { target: updaterLoader.item; property: "currentVersion"; value: root.releaseVersion; when: updaterLoader.item !== null }
+
+    function checkForUpdates(manual) {
+        if (!updater) {
+            return
+        }
+        updateManual = !!manual
+        updateDismissed = false
+        updater.check()
+        if (manual && !isOpen) {
+            setOpen(true, false)
+        }
+    }
+
+    onUpdateStateChanged: {
+        if (updateState === "available" && Plasmoid.configuration.updateAutoInstall && !updateManual) {
+            updater.install()
+        }
+        if (updateState === "uptodate") {
+            updateHideTimer.restart()
+        }
+    }
+
+    Timer {
+        id: updateHideTimer
+        interval: 5000
+        onTriggered: root.updateDismissed = true
+    }
+
+    // about once a day, a minute after start
+    Timer {
+        interval: 60000
+        running: Plasmoid.configuration.updateAuto
+        repeat: true
+        triggeredOnStart: false
+        onTriggered: {
+            interval = 6 * 3600000
+            const cfg = Plasmoid.configuration
+            if (cfg.updateAuto && Date.now() - cfg.updateLastCheck > 22 * 3600000) {
+                cfg.updateLastCheck = Date.now()
+                root.checkForUpdates(false)
+            }
+        }
+    }
+
+    Connections {
+        target: Plasmoid.configuration
+        function onUpdateCheckRequestChanged() { root.checkForUpdates(true) }
+    }
+
     // After an install or update, open the settings once (on the Readme, its first page)
     // so the list of what is new is seen. Keep in step with metadata.json.
-    readonly property string releaseVersion: "2.1.3"
+    readonly property string releaseVersion: "2.2.0"
     Timer {
         id: readmeTimer
         interval: 4000
@@ -1190,6 +1291,65 @@ PlasmoidItem {
                     PlasmaComponents3.ToolTip.text: text
                     PlasmaComponents3.ToolTip.visible: hovered
                     onClicked: Plasmoid.internalAction("configure").trigger()
+                }
+            }
+
+            // Update banner: a new version was found, is installing, or something went wrong
+            Rectangle {
+                visible: !root.updateDismissed
+                         && (root.updateState === "available" || root.updateState === "installing"
+                             || root.updateState === "installed" || root.updateState === "error"
+                             || root.updateState === "checking" && root.updateManual
+                             || root.updateState === "uptodate" && root.updateManual)
+                Layout.fillWidth: true
+                Layout.leftMargin: Kirigami.Units.smallSpacing
+                Layout.rightMargin: Kirigami.Units.smallSpacing
+                Layout.bottomMargin: Kirigami.Units.smallSpacing
+                implicitHeight: bannerRow.implicitHeight + Kirigami.Units.smallSpacing * 2
+                radius: 4
+                color: Qt.alpha(root.updateState === "error" ? Kirigami.Theme.negativeTextColor
+                                                              : Kirigami.Theme.highlightColor, 0.18)
+
+                RowLayout {
+                    id: bannerRow
+                    anchors.fill: parent
+                    anchors.margins: Kirigami.Units.smallSpacing
+                    spacing: Kirigami.Units.smallSpacing
+
+                    PlasmaComponents3.Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        font: Kirigami.Theme.smallFont
+                        text: {
+                            const u = root.updater
+                            switch (root.updateState) {
+                            case "checking": return i18n("Checking for updates…")
+                            case "uptodate": return i18n("You have the latest version (%1).", root.releaseVersion)
+                            case "available": return i18n("Version %1 is available (you have %2).", u.latest, root.releaseVersion)
+                            case "installing": return i18n("Downloading and installing version %1…", u.latest)
+                            case "installed": return i18n("Version %1 is installed. Restart Plasma to start using it.", u.latest)
+                            case "error": return u.message
+                            }
+                            return ""
+                        }
+                    }
+                    PlasmaComponents3.Button {
+                        visible: root.updateState === "available"
+                        text: i18n("Update")
+                        onClicked: root.updater.install()
+                    }
+                    PlasmaComponents3.Button {
+                        visible: root.updateState === "installed"
+                        text: i18n("Restart Plasma")
+                        onClicked: root.updater.restartShell()
+                    }
+                    PlasmaComponents3.ToolButton {
+                        visible: root.updateState !== "installing" && root.updateState !== "checking"
+                        icon.name: "window-close"
+                        text: i18n("Dismiss")
+                        display: PlasmaComponents3.AbstractButton.IconOnly
+                        onClicked: root.updateDismissed = true
+                    }
                 }
             }
 
@@ -2416,6 +2576,149 @@ Platform.SystemTrayIcon {
 }
 __SNP_EOF__
     mkdir -p "$PKG/contents/ui"
+    cat > "$PKG/contents/ui/Updater.qml" <<'__SNP_EOF__'
+import QtQuick
+import org.kde.plasma.plasma5support as P5Support
+
+// Looks for a newer release on GitHub and installs it. Loaded through a Loader, so the
+// widget keeps working if the plasma5support module is missing.
+// Needs no GitHub account: the release API of a public repository is open to everyone.
+Item {
+    id: up
+
+    property string repo: ""              // "owner/name"
+    property string currentVersion: "0"
+    // idle | checking | uptodate | available | installing | installed | error
+    property string state: "idle"
+    property string latest: ""
+    property string assetUrl: ""
+    property string notes: ""
+    property string message: ""
+
+    readonly property bool configured: /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/.test(repo)
+                                       && repo.indexOf("YOUR-GITHUB-USER") === -1
+
+    // 1 if a is newer than b, -1 if older, 0 if equal ("v2.1.3" and "2.1.3" both work)
+    function compare(a, b) {
+        const pa = String(a).replace(/^v/i, "").split(".").map(x => parseInt(x) || 0)
+        const pb = String(b).replace(/^v/i, "").split(".").map(x => parseInt(x) || 0)
+        for (let i = 0; i < Math.max(pa.length, pb.length); ++i) {
+            const d = (pa[i] || 0) - (pb[i] || 0)
+            if (d !== 0) {
+                return d > 0 ? 1 : -1
+            }
+        }
+        return 0
+    }
+
+    function fail(text) {
+        message = text
+        state = "error"
+    }
+
+    function check() {
+        if (state === "checking" || state === "installing") {
+            return
+        }
+        if (!configured) {
+            fail(i18n("No GitHub repository is set. Enter it under Configure > Updates."))
+            return
+        }
+        state = "checking"
+        message = ""
+        const xhr = new XMLHttpRequest()
+        xhr.open("GET", "https://api.github.com/repos/" + repo + "/releases/latest")
+        xhr.setRequestHeader("Accept", "application/vnd.github+json")
+        xhr.timeout = 15000
+        xhr.onreadystatechange = function () {
+            if (xhr.readyState !== XMLHttpRequest.DONE) {
+                return
+            }
+            if (xhr.status === 404) {
+                fail(i18n("No release found in %1.", repo))
+                return
+            }
+            if (xhr.status !== 200) {
+                fail(xhr.status === 403 ? i18n("GitHub says too many requests, try again later.")
+                                        : i18n("Could not reach GitHub."))
+                return
+            }
+            let rel
+            try {
+                rel = JSON.parse(xhr.responseText)
+            } catch (e) {
+                fail(i18n("Unexpected answer from GitHub."))
+                return
+            }
+            latest = String(rel.tag_name || "").replace(/^v/i, "")
+            notes = String(rel.body || "")
+            assetUrl = ""
+            for (const a of (rel.assets || [])) {
+                if (/\.plasmoid$/.test(a.name || "")) {
+                    assetUrl = String(a.browser_download_url || "")
+                    break
+                }
+            }
+            if (compare(latest, currentVersion) > 0) {
+                state = assetUrl !== "" ? "available" : "error"
+                if (assetUrl === "") {
+                    message = i18n("Version %1 has no .plasmoid file attached.", latest)
+                }
+            } else {
+                state = "uptodate"
+            }
+        }
+        xhr.onerror = function () { fail(i18n("Could not reach GitHub.")) }
+        xhr.ontimeout = function () { fail(i18n("GitHub did not answer in time.")) }
+        xhr.send()
+    }
+
+    // The download address must really be a release file of the configured repository,
+    // because it is handed to a shell command.
+    function urlOk(u) {
+        const prefix = "https://github.com/" + repo + "/releases/download/"
+        return u.indexOf(prefix) === 0 && /^[A-Za-z0-9._%+\/:-]+$/.test(u) && /\.plasmoid$/.test(u)
+    }
+
+    function install() {
+        if (state !== "available") {
+            return
+        }
+        if (!urlOk(assetUrl)) {
+            fail(i18n("The download address was not accepted."))
+            return
+        }
+        state = "installing"
+        const cmd = "sh -c 'set -e; d=$(mktemp -d); trap \"rm -rf $d\" EXIT; "
+                  + "curl -fsSL --max-time 180 -o \"$d/p.plasmoid\" \"" + assetUrl + "\"; "
+                  + "kpackagetool6 -t Plasma/Applet -u \"$d/p.plasmoid\" "
+                  + "|| kpackagetool6 -t Plasma/Applet -i \"$d/p.plasmoid\"' # snp-install"
+        exec.connectSource(cmd)
+    }
+
+    function restartShell() {
+        exec.connectSource("sh -c 'systemctl --user restart --no-block plasma-plasmashell.service "
+                           + "|| (kquitapp6 plasmashell; sleep 1; setsid kstart plasmashell)' # snp-restart")
+    }
+
+    P5Support.DataSource {
+        id: exec
+        engine: "executable"
+        connectedSources: []
+        onNewData: (source, data) => {
+            disconnectSource(source)
+            if (source.indexOf("# snp-install") !== -1) {
+                if (data["exit code"] === 0) {
+                    state = "installed"
+                } else {
+                    fail(i18n("The update could not be installed. Try './install.sh update' in a terminal."))
+                }
+            }
+        }
+    }
+}
+__SNP_EOF__
+    mkdir -p "$PKG/contents/ui"
     cat > "$PKG/contents/ui/configGeneral.qml" <<'__SNP_EOF__'
 import QtQuick
 import QtQuick.Controls as QQC2
@@ -2729,6 +3032,64 @@ KCM.SimpleKCM {
 }
 __SNP_EOF__
     mkdir -p "$PKG/contents/ui"
+    cat > "$PKG/contents/ui/configUpdates.qml" <<'__SNP_EOF__'
+import QtQuick
+import QtQuick.Controls as QQC2
+import QtQuick.Layouts
+import org.kde.kirigami as Kirigami
+import org.kde.kcmutils as KCM
+
+KCM.SimpleKCM {
+    property alias cfg_updateRepo: repoField.text
+    property alias cfg_updateAuto: autoCheck.checked
+    property alias cfg_updateAutoInstall: installCheck.checked
+    property int cfg_updateCheckRequest: 0
+
+    Kirigami.FormLayout {
+        QQC2.TextField {
+            id: repoField
+            Kirigami.FormData.label: i18n("GitHub repository:")
+            placeholderText: i18n("owner/repository")
+            Layout.preferredWidth: Kirigami.Units.gridUnit * 16
+        }
+
+        QQC2.CheckBox {
+            id: autoCheck
+            Kirigami.FormData.label: i18n("Checking:")
+            text: i18n("Look for a new version about once a day")
+        }
+
+        QQC2.CheckBox {
+            id: installCheck
+            Kirigami.FormData.label: i18n("Installing:")
+            text: i18n("Install a new version without asking")
+            enabled: autoCheck.checked
+        }
+
+        QQC2.Button {
+            Kirigami.FormData.label: i18n("Now:")
+            text: i18n("Check for updates")
+            icon.name: "view-refresh"
+            onClicked: cfg_updateCheckRequest++
+        }
+
+        QQC2.Label {
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 22
+            wrapMode: Text.Wrap
+            opacity: 0.7
+            text: i18n("Press OK or Apply to run the check; the result appears at the top of the panel. You can also right-click the handle and choose \"Check for updates\".")
+        }
+
+        QQC2.Label {
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 22
+            wrapMode: Text.Wrap
+            opacity: 0.7
+            text: i18n("No GitHub account or login is needed for a public repository. A check only asks api.github.com for the latest release; an update downloads the release's .plasmoid file and installs it, keeping your settings. Plasma must be restarted (the panel offers to do it) to start the new version. Updates run code from that repository, so only use a repository you trust.")
+        }
+    }
+}
+__SNP_EOF__
+    mkdir -p "$PKG/contents/ui"
     cat > "$PKG/contents/ui/configReadme.qml" <<'__SNP_EOF__'
 import QtQuick
 import QtQuick.Controls as QQC2
@@ -2740,12 +3101,11 @@ KCM.SimpleKCM {
     id: page
 
     readonly property var news: [
-        i18n("Notification history: a history button at the top of the panel shows everything you received in the last N days, grouped by day, with its own search box. It survives Clear All and restarts."),
-        i18n("History settings (General): turn it on or off and choose how many days back it is kept."),
+        i18n("Updates from GitHub: the app can look for a new release (automatically once a day, or with \"Check for updates\" in the right-click menu or Configure > Updates). A banner at the top of the panel offers to download and install it in the background; your settings are kept. No GitHub account is needed."),
         i18n("Fixed: long notifications in the history were cut off; they now have a \"Show more\" link."),
-        i18n("Fixed: notification text in the history showed raw markup; it now displays like in the list."),
-        i18n("Fixed: with a wider handle panel, the handle no longer covers part of the notifications in the opened drawer.")
+        i18n("Fixed: notification text in the history showed raw markup; it now displays like in the list.")
     ]
+
 
 
     readonly property var sections: [
@@ -2765,6 +3125,12 @@ KCM.SimpleKCM {
             [i18n("Delay before opening"), i18n("How long the pointer must rest on the handle before it opens (hover mode).")],
             [i18n("Close when the pointer leaves"), i18n("Closes a panel that was opened by hovering, after the closing delay.")],
             [i18n("Width and height"), i18n("Size of the opened panel: width in grid units, height as a share of the screen.")]
+        ]},
+        { title: i18n("Updates"), items: [
+            [i18n("GitHub repository"), i18n("Where releases are looked up, as owner/repository. A public repository needs no login.")],
+            [i18n("Look for a new version"), i18n("Checks about once a day. Nothing is installed unless you agree.")],
+            [i18n("Install without asking"), i18n("Downloads and installs a found update by itself. Plasma still has to be restarted to use it.")],
+            [i18n("Check for updates"), i18n("Checks now (press OK or Apply). Also in the right-click menu of the handle.")]
         ]},
         { title: i18n("Handle"), items: [
             [i18n("Handle shows"), i18n("The number of notifications (a bell when none), a bell and the number, or only a bell.")],
@@ -2792,7 +3158,7 @@ KCM.SimpleKCM {
 
         Kirigami.Heading {
             level: 3
-            text: i18n("What's new in 2.1.3")
+            text: i18n("What's new in 2.2.0")
             Layout.topMargin: Kirigami.Units.largeSpacing
         }
         Kirigami.Separator { Layout.fillWidth: true }
@@ -2845,6 +3211,34 @@ KCM.SimpleKCM {
     }
 }
 __SNP_EOF__
+    if [[ -n $GITHUB_REPO ]]; then
+        sed -i "s#YOUR-GITHUB-USER/YOUR-REPO#$GITHUB_REPO#" "$PKG/contents/config/main.xml"
+    fi
+}
+
+make_package() {
+    extract_package
+    local ver out
+    ver="$(sed -n 's/.*"Version": *"\([^"]*\)".*/\1/p' "$PKG/metadata.json" | head -1)"
+    out="$PWD/$ID-$ver.plasmoid"
+    rm -f "$out"
+    if command -v zip >/dev/null; then
+        (cd "$PKG" && zip -qr "$out" .)
+    else
+        python3 - "$PKG" "$out" <<'PY'
+import os, sys, zipfile
+src, out = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+    for root, _, files in os.walk(src):
+        for f in files:
+            p = os.path.join(root, f)
+            z.write(p, os.path.relpath(p, src))
+PY
+    fi
+    say "Built $out"
+    echo "Attach this file to a GitHub release whose tag is v$ver (for example with"
+    echo "  gh release create v$ver \"$out\" --title \"$ver\" --notes \"What is new...\" )."
+    echo "Copies of the app that check for updates will then offer it."
 }
 
 install_pkg() {
@@ -3036,6 +3430,9 @@ ${b}Other options${r}  (right-click the handle, then Configure)
            notifications (and how many); custom colours; blink never,
            a few times, or until you open the panel.
   Readme   a short description of the app and of every option.
+  Updates  GitHub repository, check once a day, install without asking,
+           check now. A banner in the panel offers new versions; no
+           GitHub account is needed for a public repository.
   Also     right-click the handle or the tray icon for Do Not Disturb and
            Clear All. In the panel: search (Ctrl+F), timed Do Not Disturb,
            swipe a notification sideways to dismiss it.
@@ -3089,6 +3486,9 @@ $(js_create)"
         restart_shell
         say "Done. Your panel and settings were kept."
         print_note 0
+        ;;
+    package)
+        make_package
         ;;
     uninstall)
         if shell_running; then
