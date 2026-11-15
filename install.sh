@@ -174,7 +174,7 @@ extract_package() {
         "Icon": "notification-active",
         "Category": "Utilities",
         "License": "GPL-2.0+",
-        "Version": "2.3.3",
+        "Version": "2.4.0",
         "Copyright": "Copyright © Mikroner",
         "Website": "https://github.com/mikroner/Plasma_Notification_SidePanel",
         "Authors": [
@@ -219,6 +219,10 @@ __SNP_EOF__
         </entry>
         <entry name="soundFile" type="String">
             <default></default>
+        </entry>
+        <!-- 0 = Qt Multimedia inside the widget, falling back to system commands; 1 = system commands only -->
+        <entry name="soundEngine" type="Int">
+            <default>0</default>
         </entry>
         <!-- milliseconds of silence played first, so a sleeping audio device wakes up before the sound -->
         <entry name="soundLeadIn" type="Int">
@@ -926,7 +930,7 @@ PlasmoidItem {
         soundMessage = ""
         soundTesting = test
         lastSoundMs = Date.now()
-        updater.play(what, cfg.soundLeadIn)
+        updater.play(what, cfg.soundLeadIn, cfg.soundEngine === 0)
     }
     property bool soundTesting: false
 
@@ -1016,7 +1020,7 @@ PlasmoidItem {
 
     // After an install or update, open the settings once (on the Readme, its first page)
     // so the list of what is new is seen. Keep in step with metadata.json.
-    readonly property string releaseVersion: "2.3.3"
+    readonly property string releaseVersion: "2.4.0"
     Timer {
         id: readmeTimer
         interval: 4000
@@ -2786,19 +2790,59 @@ Item {
     signal soundFailed(string text)
     signal soundPlayed(string info)
 
-    // Plays a built-in sound by name (looked up in the installed sound themes) or a file by its
-    // full path, with whichever player is installed.
-    function play(nameOrPath, leadInMs) {
-        if (!/^[A-Za-z0-9._-]+$/.test(nameOrPath) && !/^\/[^"'`$\;&|<>*?!\n]+$/.test(nameOrPath)) {
-            soundFailed(i18n("This sound file name has characters that are not allowed."))
-            return
+    property var lastSound: ({ what: "", lead: 0 })
+
+    readonly property var media: mediaLoader.item
+
+    Loader {
+        id: mediaLoader
+        source: "SoundPlayer.qml"
+    }
+
+    Connections {
+        target: up.media
+        ignoreUnknownSignals: true
+        function onStarted(file) { up.soundPlayed(i18n("Qt Multimedia: %1", file)) }
+        function onFailed(text) {
+            // Qt Multimedia could not play it: use the system commands instead
+            console.warn("Side Notification Panel: Qt Multimedia failed (" + text + "), using system commands")
+            up.shellPlay(up.lastSound.what, up.lastSound.lead)
         }
-        const script = 'n="' + nameOrPath + '"; f=""; '
+    }
+
+    function nameOk(n) {
+        return /^[A-Za-z0-9._-]+$/.test(n) || /^\/[^"'`$\;&|<>*?!\n]+$/.test(n)
+    }
+
+    // Shell fragment that turns a built-in name (looked up in the installed sound themes) or a
+    // full path into $f, and leaves with code 3 if there is no such file.
+    function findScript(n) {
+        return 'n="' + n + '"; f=""; '
             + 'if [ "${n#/}" != "$n" ]; then f="$n"; else '
             + 'for d in /usr/share/sounds/ocean/stereo /usr/share/sounds/freedesktop/stereo /usr/share/sounds/Oxygen/stereo "$HOME/.local/share/sounds"; do '
             + 'for e in oga ogg wav; do [ -r "$d/$n.$e" ] && { f="$d/$n.$e"; break 2; }; done; done; fi; '
             + '[ -n "$f" ] && [ -r "$f" ] || exit 3; '
-            + 'L=' + Math.max(0, Math.min(2000, parseInt(leadInMs) || 0)) + '; '
+    }
+
+    // Plays a built-in sound by name or a file by its full path. useQt: try Qt Multimedia
+    // first (no external program); the system commands are the fallback.
+    function play(nameOrPath, leadInMs, useQt) {
+        if (!nameOk(nameOrPath)) {
+            soundFailed(i18n("This sound file name has characters that are not allowed."))
+            return
+        }
+        const lead = Math.max(0, Math.min(2000, parseInt(leadInMs) || 0))
+        lastSound = { what: nameOrPath, lead: lead }
+        if (useQt && media) {
+            exec.connectSource("sh -c '" + findScript(nameOrPath) + "echo \"$f\"; exit 0' # snp-resolve-" + Date.now())
+        } else {
+            shellPlay(nameOrPath, lead)
+        }
+    }
+
+    function shellPlay(nameOrPath, lead) {
+        const script = findScript(nameOrPath)
+            + 'L=' + lead + '; '
             // a short silent stream first: it wakes a suspended audio device, which would
             // otherwise swallow the start (or all) of a short sound
             + 'if [ "$L" -gt 0 ] && command -v paplay >/dev/null 2>&1; then '
@@ -2822,7 +2866,14 @@ Item {
         connectedSources: []
         onNewData: (source, data) => {
             disconnectSource(source)
-            if (source.indexOf("# snp-sound") !== -1) {
+            if (source.indexOf("# snp-resolve") !== -1) {
+                const path = String(data["stdout"] || "").trim()
+                if (data["exit code"] === 0 && path !== "") {
+                    media.playFile(path, lastSound.lead)
+                } else {
+                    soundFailed(i18n("The sound file was not found."))
+                }
+            } else if (source.indexOf("# snp-sound") !== -1) {
                 const code = data["exit code"]
                 if (code === 0) {
                     soundPlayed(String(data["stdout"] || "").trim())
@@ -2837,6 +2888,81 @@ Item {
                 } else {
                     fail(i18n("The update could not be installed. Try './install.sh update' in a terminal."))
                 }
+            }
+        }
+    }
+}
+__SNP_EOF__
+    mkdir -p "$PKG/contents/ui"
+    cat > "$PKG/contents/ui/SoundPlayer.qml" <<'__SNP_EOF__'
+import QtQuick
+import QtMultimedia
+
+// Plays one sound file with Qt Multimedia, inside the widget. Loaded through a Loader, so a
+// missing QtMultimedia module only means that the system commands are used instead.
+Item {
+    id: sp
+
+    signal started(string file)
+    signal failed(string text)
+
+    property string file: ""
+    property bool running: false      // the sound is audible (or about to be)
+
+    // leadIn: play the sound silently for this long first. That wakes a sleeping sound card,
+    // then the sound is played again from the start at full volume.
+    function playFile(path, leadIn) {
+        mp.stop()
+        leadTimer.stop()
+        file = path
+        running = false
+        ao.volume = leadIn > 0 ? 0 : 1
+        mp.source = "file://" + encodeURI(path)
+        mp.play()
+        if (leadIn > 0) {
+            leadTimer.interval = leadIn
+            leadTimer.restart()
+        } else {
+            running = true
+            started(file)
+        }
+        watchdog.interval = leadIn + 4000
+        watchdog.restart()
+    }
+
+    AudioOutput {
+        id: ao
+    }
+
+    MediaPlayer {
+        id: mp
+        audioOutput: ao
+        onErrorOccurred: (error, errorString) => {
+            watchdog.stop()
+            leadTimer.stop()
+            if (!sp.running) {
+                sp.failed(errorString !== "" ? errorString : qsTr("playback error"))
+            }
+        }
+    }
+
+    Timer {
+        id: leadTimer
+        onTriggered: {
+            mp.stop()
+            ao.volume = 1
+            mp.play()
+            sp.running = true
+            sp.started(sp.file)
+        }
+    }
+
+    // nothing started: do not leave the caller waiting
+    Timer {
+        id: watchdog
+        onTriggered: {
+            if (!sp.running) {
+                sp.failed(qsTr("playback did not start"))
             }
         }
     }
@@ -2861,6 +2987,7 @@ KCM.SimpleKCM {
     property alias cfg_soundChoice: soundCombo.currentIndex
     property alias cfg_soundFile: soundFileField.text
     property alias cfg_soundLeadIn: leadSpin.value
+    property alias cfg_soundEngine: engineCombo.currentIndex
     property alias cfg_historyEnabled: historyCheck.checked
     property alias cfg_historyDays: historyDaysSpin.value
 
@@ -2949,6 +3076,13 @@ KCM.SimpleKCM {
             onAccepted: soundFileField.text = decodeURIComponent(String(selectedFile).replace(/^file:\/\//, ""))
         }
 
+        QQC2.ComboBox {
+            id: engineCombo
+            Kirigami.FormData.label: i18n("Player:")
+            enabled: soundCheck.checked
+            model: [i18n("Automatic (built into the widget, else system commands)"), i18n("System commands only (paplay, pw-play...)")]
+        }
+
         QQC2.SpinBox {
             id: leadSpin
             Kirigami.FormData.label: i18n("Warm-up:")
@@ -2980,7 +3114,7 @@ KCM.SimpleKCM {
                 if (!what) {
                     testStatus.text = i18n("Choose a sound file first.")
                 } else {
-                    testLoader.item.play(what, leadSpin.value)
+                    testLoader.item.play(what, leadSpin.value, engineCombo.currentIndex === 0)
                 }
             }
         }
@@ -3339,6 +3473,7 @@ KCM.SimpleKCM {
     id: page
 
     readonly property var news: [
+        i18n("Sound player: sounds are now played by the widget itself (Qt Multimedia) with no external program; the system commands (paplay...) are used as a fallback, or on request in General > Sound > Player."),
         i18n("Sound test: \"Play sound\" in the settings now plays immediately, without Apply, and shows which player was used. paplay is tried first."),
         i18n("Sound sometimes silent: a new \"Warm-up\" setting plays a moment of silence first, so a sleeping sound card is awake when the sound starts."),
         i18n("Sound fixes: sounds are now found in the installed sound themes (Ocean, freedesktop), more players are tried, \"My own file\" opens a file browser, and a failing sound now explains why in the panel."),
@@ -3355,6 +3490,7 @@ KCM.SimpleKCM {
             [i18n("Lines before \"Show more\""), i18n("How many lines of a long message are shown before it is folded.")],
             [i18n("Relative times"), i18n("Show \"5 min ago\" instead of the clock time.")],
             [i18n("Mark as read on hover"), i18n("Notifications count as read once you hover the open panel.")],
+            [i18n("Player"), i18n("Automatic plays the sound inside the widget and falls back to system commands; or use the system commands only.")],
             [i18n("Warm-up"), i18n("Milliseconds of silence played before the sound so a sleeping audio device wakes up first. 0 turns it off.")],
             [i18n("Play a sound"), i18n("Plays a sound when an unread notification arrives while the panel is closed. Choose a built-in sound or your own file; \"Play sound\" tries it.")],
             [i18n("Keep a history"), i18n("Remembers notifications after Clear All and restarts. Open it with the history button at the top of the panel.")],
@@ -3401,7 +3537,7 @@ KCM.SimpleKCM {
 
         Kirigami.Heading {
             level: 3
-            text: i18n("What's new in 2.3.3")
+            text: i18n("What's new in 2.4.0")
             Layout.topMargin: Kirigami.Units.largeSpacing
         }
         Kirigami.Separator { Layout.fillWidth: true }
@@ -3674,7 +3810,8 @@ ${b}Other options${r}  (right-click the handle, then Configure)
            a few times, or until you open the panel.
   Readme   a short description of the app and of every option.
   Sound    play a sound for a new notification (off by default): pick a
-           built-in sound or your own file.
+           built-in sound or your own file (browse dialog), the player
+           (built into the widget, or system commands) and a warm-up.
   Updates  GitHub repository, check once a day, install without asking,
            check now. A banner in the panel offers new versions; no
            GitHub account is needed for a public repository.
