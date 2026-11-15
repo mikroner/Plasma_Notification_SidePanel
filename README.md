@@ -146,13 +146,13 @@ Repository is configurable. By default is: **(mikroner/Plasma_Notification_SideP
 Updates run code from the repository, so only use a repository you trust.
 
 **Troubleshooting**
-The tray icon does not show: set it to "Always shown" in the system tray's settings. It needs the Qt Labs Platform QML module.
-Nothing appears after installing: run ./install.sh from a terminal inside your Plasma session so it can reach the shell.
-Try it out: ./install.sh test sends sample notifications.
-Reset a broken panel: ./install.sh install --recreate.
-Uninstall
+
+- The tray icon does not show: set it to "Always shown" in the system tray's settings. It needs the Qt Labs Platform QML module.
+- Nothing appears after installing: run ./install.sh from a terminal inside your Plasma session so it can reach the shell.
+- Try it out: ./install.sh test sends sample notifications.
+- Reset a broken panel: ./install.sh install --recreate.
+- Uninstall
 bash
 ./install.sh uninstall
-License
 
-GPL-2.0-or-later
+**Licensed under GPL-2.0**
