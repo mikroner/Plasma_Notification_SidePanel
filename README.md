@@ -1,6 +1,8 @@
-Side Notification Panel
+**Side Notification Panel**
 
-A notification history for (KDE) Plasma 6 that lives and slides out of the edge of your screen.
+Linux - KDE Plasma 6 only
+
+A notification history that lives and slides out of the edge of your screen.
 
 A small handle stays visible on a screen edge. Click it (or an icon in the system tray) and a drawer opens, attached to the edge, with all your notifications. The handle shows how many are unread, which apps they came from, and can blink when a new one arrives.
 
