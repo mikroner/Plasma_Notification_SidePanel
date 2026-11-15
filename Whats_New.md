@@ -7,6 +7,9 @@ Everything that changed in **Side Notification Panel**, newest first.
 
 ---
 
+## 2.7.0
+- Fixed: the **Restart Plasma** button after an online update did not restart Plasma on some systems. It now restarts Plasma the same way the installer does: through the systemd service if Plasma runs as one, otherwise by quitting and starting it again. If the restart fails, the panel now says so and shows the command to run.
+
 ## 2.6.0
 - **Folding groups.** When notifications are grouped by application, groups without unread notifications fold up and show their newest one or two notifications as a single line each. Groups with unread notifications stay open.
 - When a folded group has more notifications than the lines shown, a line of dots (`. . . . . .`) follows them. Click it to open the group.
