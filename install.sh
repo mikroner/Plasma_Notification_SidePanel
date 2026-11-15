@@ -174,7 +174,7 @@ extract_package() {
         "Icon": "notification-active",
         "Category": "Utilities",
         "License": "GPL-2.0+",
-        "Version": "2.6.0",
+        "Version": "2.7.0",
         "Copyright": "Copyright © Mikroner",
         "Website": "https://github.com/mikroner/Plasma_Notification_SidePanel",
         "Authors": [
@@ -1175,7 +1175,7 @@ PlasmoidItem {
 
     // After an install or update, open the settings once (on the Readme, its first page)
     // so the list of what is new is seen. Keep in step with metadata.json.
-    readonly property string releaseVersion: "2.6.0"
+    readonly property string releaseVersion: "2.7.0"
     Timer {
         id: readmeTimer
         interval: 4000
@@ -3143,8 +3143,13 @@ Item {
     }
 
     function restartShell() {
-        exec.connectSource("sh -c 'systemctl --user restart --no-block plasma-plasmashell.service "
-                           + "|| (kquitapp6 plasmashell; sleep 1; setsid kstart plasmashell)' # snp-restart")
+        // Same logic as install.sh. Restart through systemd only if plasmashell really runs as
+        // that unit; "systemctl restart" on an inactive unit would just start a second shell.
+        exec.connectSource("sh -c 'if systemctl --user is-active --quiet plasma-plasmashell.service; then "
+                           + "systemctl --user restart --no-block plasma-plasmashell.service; else "
+                           + "kquitapp6 plasmashell >/dev/null 2>&1; sleep 1; "
+                           + "setsid kstart plasmashell >/dev/null 2>&1 || setsid plasmashell --replace >/dev/null 2>&1; fi' "
+                           + "# snp-restart-" + Date.now())
     }
 
     P5Support.DataSource {
@@ -3171,6 +3176,10 @@ Item {
                     soundFailed(i18n("The sound file was not found."))
                 } else if (code !== 0) {
                     soundFailed(i18n("No sound player worked. Install one of: pipewire-utils (pw-play), pulseaudio-utils (paplay), libcanberra or ffmpeg."))
+                }
+            } else if (source.indexOf("# snp-restart") !== -1) {
+                if (data["exit code"] !== 0) {
+                    fail(i18n("Plasma could not be restarted. Log out and in again, or run: systemctl --user restart plasma-plasmashell.service"))
                 }
             } else if (source.indexOf("# snp-install") !== -1) {
                 if (data["exit code"] === 0) {
@@ -3935,16 +3944,10 @@ KCM.SimpleKCM {
     id: page
 
     readonly property var news: [
-        i18n("Folded groups: with grouping by app, groups without unread notifications fold up and show their newest one or two notifications as one line, followed by a line of dots when there are more; groups with unread notifications stay open. Both can be changed in General."),
-        i18n("Group headers (grouped by app) are tinted with the app's colour, slightly stronger than its cards. The icon colour is now the default for new installs; a colour you chose is kept."),
-        i18n("Card colours: notifications can be tinted per app (General): a colour made from the app's name, or the main colour of its icon (the default). Also used in the history."),
-        i18n("Sound player: sounds are now played by the widget itself (Qt Multimedia) with no external program; the system commands (paplay...) are used as a fallback, or on request in General > Sound > Player."),
-        i18n("Sound test: \"Play sound\" in the settings now plays immediately, without Apply, and shows which player was used. paplay is tried first."),
-        i18n("Sound sometimes silent: a new \"Warm-up\" setting plays a moment of silence first, so a sleeping sound card is awake when the sound starts."),
-        i18n("Sound fixes: sounds are now found in the installed sound themes (Ocean, freedesktop), more players are tried, \"My own file\" opens a file browser, and a failing sound now explains why in the panel."),
-        i18n("Sound: an option (General) to play a sound when a new notification arrives, with a choice of sounds or your own file and a button to try it."),
-        i18n("About page: website, copyright and author now point to the project on GitHub.")
+        i18n("Fixed: the \"Restart Plasma\" button after an online update now restarts Plasma reliably, the same way the installer does, and says so if it fails."),
+        i18n("Folded groups: with grouping by app, groups without unread notifications fold up and show their newest one or two notifications as one line, followed by a line of dots when there are more; groups with unread notifications stay open. Both can be changed in General.")
     ]
+
 
 
 
@@ -4004,7 +4007,7 @@ KCM.SimpleKCM {
 
         Kirigami.Heading {
             level: 3
-            text: i18n("What's new in 2.6.0")
+            text: i18n("What's new in 2.7.0")
             Layout.topMargin: Kirigami.Units.largeSpacing
         }
         Kirigami.Separator { Layout.fillWidth: true }
