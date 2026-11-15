@@ -10,6 +10,7 @@ The handle shows how many are unread, which apps they came from, and can blink w
 Everything is delivered by one self-contained script, install.sh. The widget is embedded in it. An updater is integrated in the app.
 
 **Features**
+
 - Notification drawer attached flush to the screen edge, with the handle drawn on top of it
 - Rich notifications: images, clickable links, action buttons, inline reply, "Show more" for long text
 - Grouping by application or by date, with collapsible sections
@@ -25,6 +26,7 @@ Everything is delivered by one self-contained script, install.sh. The widget is 
 - Chrome, chrome apps and others that send notifications through the standard desktop notification service appear here too (a Chrome web app shows up under "Google Chrome").
 
 **Requirements**
+
 - KDE Plasma 6 (kpackagetool6, plasmashell)
 - A terminal running inside your Plasma session
 - For the system tray icon: the Qt Labs Platform QML module (some distributions package it separately; the rest of the widget works without it)
@@ -94,9 +96,11 @@ bash
 Right-click the handle, then Configure. 
 
 **Readme** 
+
 After an install or update the settings window opens once on the Readme page.
 
 **General**
+
 Option	What it does
 Group notifications	By date, by application, or not grouped
 Lines before "Show more"	How many lines of a long message are shown before it is folded
@@ -107,6 +111,7 @@ Keep a history	Remember notifications, also after Clear All and restarts
 Keep for	How many days back the history is kept (1 to 365)
 
 **Opening**
+
 Option	What it does
 Opened panel	Drawer attached to the screen edge, or a Plasma popup next to the handle
 System tray	Also open the panel from a tray icon
@@ -117,6 +122,7 @@ Delay before closing	How long the pointer must be away
 Width and height	Size of the opened panel
 
 **Handle**
+
 Option	What it does
 Handle shows	The number (a bell when none), a bell and the number, or only a bell
 The number counts	New (unread) notifications, or all notifications
@@ -125,14 +131,14 @@ Colours	Follow the Plasma theme, or custom colours for the normal and new-notifi
 Blinking	Never, a few times, or until you open the panel
 
 **Updates**
+
 Option	What it does
 GitHub repository	Where releases are looked up, as owner/repository
 Look for a new version	About once a day
 Install without asking	Download and install a found update by itself (Plasma still has to be restarted to use it)
 Check for updates	Check now (press OK or Apply); also in the right-click menu of the handle
 
-**Notes**: 
-Pop-ups off works by holding Plasma's notifications back, the same way as Do Not Disturb. Notification sounds are silenced too, and critical notifications may still pop up if Plasma is set to allow that in Do Not Disturb mode.
+**Notes**: Pop-ups off works by holding Plasma's notifications back, the same way as Do Not Disturb. Notification sounds are silenced too, and critical notifications may still pop up if Plasma is set to allow that in Do Not Disturb mode.
 History keeps text only (title, text, app, icon, time), not images or action buttons, up to 1500 entries. It only records notifications that arrive while the widget is running. It is stored in the widget's own settings.
 Do Not Disturb set in this widget is tracked by this widget; it does not follow a Do Not Disturb turned on in Plasma's own panel.
 In a wide auto-hiding sidebar panel, Plasma itself controls when the panel appears, so the opening options do not apply.
@@ -152,7 +158,9 @@ Updates run code from the repository, so only use a repository you trust.
 - Try it out: ./install.sh test sends sample notifications.
 - Reset a broken panel: ./install.sh install --recreate.
 - Uninstall
+
 bash
 ./install.sh uninstall
+
 
 **Licensed under GPL-2.0**
