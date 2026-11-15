@@ -27,7 +27,7 @@
 set -euo pipefail
 
 ID="com.user.sidenotifications"
-GITHUB_REPO="mikroner/Plasma_Notification_SidePanel" # e.g. "yourname/side-notification-panel"; the app looks for releases here
+GITHUB_REPO=""      # e.g. "yourname/side-notification-panel"; the app looks for releases here
 TMP=""
 PKG=""
 cleanup() { [[ -n $TMP ]] && rm -rf "$TMP"; return 0; }
@@ -174,7 +174,7 @@ extract_package() {
         "Icon": "notification-active",
         "Category": "Utilities",
         "License": "GPL-2.0+",
-        "Version": "2.2.0",
+        "Version": "2.2.1",
         "Authors": [
             {
                 "Name": "You"
@@ -957,7 +957,7 @@ PlasmoidItem {
 
     // After an install or update, open the settings once (on the Readme, its first page)
     // so the list of what is new is seen. Keep in step with metadata.json.
-    readonly property string releaseVersion: "2.2.0"
+    readonly property string releaseVersion: "2.2.1"
     Timer {
         id: readmeTimer
         interval: 4000
@@ -3158,7 +3158,7 @@ KCM.SimpleKCM {
 
         Kirigami.Heading {
             level: 3
-            text: i18n("What's new in 2.2.0")
+            text: i18n("What's new in 2.2.1")
             Layout.topMargin: Kirigami.Units.largeSpacing
         }
         Kirigami.Separator { Layout.fillWidth: true }
@@ -3223,7 +3223,7 @@ make_package() {
     out="$PWD/$ID-$ver.plasmoid"
     rm -f "$out"
     if command -v zip >/dev/null; then
-        (cd "$PKG" && zip -qr "$out" .)
+        (cd "$PKG" && zip -qrX "$out" .)
     else
         python3 - "$PKG" "$out" <<'PY'
 import os, sys, zipfile
