@@ -174,7 +174,7 @@ extract_package() {
         "Icon": "notification-active",
         "Category": "Utilities",
         "License": "GPL-2.0+",
-        "Version": "2.2",
+        "Version": "2.3.3",
         "Copyright": "Copyright © Mikroner",
         "Website": "https://github.com/mikroner/Plasma_Notification_SidePanel",
         "Authors": [
@@ -208,6 +208,21 @@ __SNP_EOF__
         </entry>
         <entry name="markReadOnHover" type="Bool">
             <default>true</default>
+        </entry>
+        <!-- play a sound when a new notification arrives -->
+        <entry name="soundEnabled" type="Bool">
+            <default>false</default>
+        </entry>
+        <!-- 0 = Message, 1 = Message (short), 2 = Bell, 3 = Complete, 4 = Information, 5 = your own file -->
+        <entry name="soundChoice" type="Int">
+            <default>1</default>
+        </entry>
+        <entry name="soundFile" type="String">
+            <default></default>
+        </entry>
+        <!-- milliseconds of silence played first, so a sleeping audio device wakes up before the sound -->
+        <entry name="soundLeadIn" type="Int">
+            <default>1000</default>
         </entry>
         <!-- keep a history of notifications that survives Clear All and restarts -->
         <entry name="historyEnabled" type="Bool">
@@ -892,6 +907,47 @@ PlasmoidItem {
         onTriggered: root.scheduleDnd()
     }
 
+    // ---- sound on a new notification ------------------------------------------
+    readonly property var soundNames: ["message", "message-new-instant", "bell", "complete", "dialog-information"]
+    property double lastSoundMs: 0
+    property string soundMessage: ""           // why the last test sound failed
+
+    function playSound(test) {
+        if (!updater || (!test && Date.now() - lastSoundMs < 1500)) {
+            return
+        }
+        const cfg = Plasmoid.configuration
+        const what = cfg.soundChoice >= 5 ? cfg.soundFile : soundNames[cfg.soundChoice]
+        if (!what) {
+            soundMessage = i18n("No sound file is chosen.")
+            if (test && !isOpen) setOpen(true, false)
+            return
+        }
+        soundMessage = ""
+        soundTesting = test
+        lastSoundMs = Date.now()
+        updater.play(what, cfg.soundLeadIn)
+    }
+    property bool soundTesting: false
+
+    Connections {
+        target: root.updater
+        ignoreUnknownSignals: true
+        function onSoundFailed(text) {
+            console.warn("Side Notification Panel: " + text)
+            if (root.soundTesting) {
+                root.soundMessage = text
+                if (!root.isOpen) root.setOpen(true, false)
+            }
+        }
+    }
+
+    onNewNotification: {
+        if (Plasmoid.configuration.soundEnabled) {
+            playSound(false)
+        }
+    }
+
     // ---- updates from GitHub --------------------------------------------------
     Loader {
         id: updaterLoader
@@ -960,7 +1016,7 @@ PlasmoidItem {
 
     // After an install or update, open the settings once (on the Readme, its first page)
     // so the list of what is new is seen. Keep in step with metadata.json.
-    readonly property string releaseVersion: "2.2"
+    readonly property string releaseVersion: "2.3.3"
     Timer {
         id: readmeTimer
         interval: 4000
@@ -1352,6 +1408,34 @@ PlasmoidItem {
                         text: i18n("Dismiss")
                         display: PlasmaComponents3.AbstractButton.IconOnly
                         onClicked: root.updateDismissed = true
+                    }
+                }
+            }
+
+            Rectangle {
+                visible: root.soundMessage !== ""
+                Layout.fillWidth: true
+                Layout.leftMargin: Kirigami.Units.smallSpacing
+                Layout.rightMargin: Kirigami.Units.smallSpacing
+                Layout.bottomMargin: Kirigami.Units.smallSpacing
+                implicitHeight: soundRow.implicitHeight + Kirigami.Units.smallSpacing * 2
+                radius: 4
+                color: Qt.alpha(Kirigami.Theme.negativeTextColor, 0.18)
+                RowLayout {
+                    id: soundRow
+                    anchors.fill: parent
+                    anchors.margins: Kirigami.Units.smallSpacing
+                    PlasmaComponents3.Label {
+                        Layout.fillWidth: true
+                        wrapMode: Text.Wrap
+                        font: Kirigami.Theme.smallFont
+                        text: root.soundMessage
+                    }
+                    PlasmaComponents3.ToolButton {
+                        icon.name: "window-close"
+                        text: i18n("Dismiss")
+                        display: PlasmaComponents3.AbstractButton.IconOnly
+                        onClicked: root.soundMessage = ""
                     }
                 }
             }
@@ -2699,6 +2783,34 @@ Item {
         exec.connectSource(cmd)
     }
 
+    signal soundFailed(string text)
+    signal soundPlayed(string info)
+
+    // Plays a built-in sound by name (looked up in the installed sound themes) or a file by its
+    // full path, with whichever player is installed.
+    function play(nameOrPath, leadInMs) {
+        if (!/^[A-Za-z0-9._-]+$/.test(nameOrPath) && !/^\/[^"'`$\;&|<>*?!\n]+$/.test(nameOrPath)) {
+            soundFailed(i18n("This sound file name has characters that are not allowed."))
+            return
+        }
+        const script = 'n="' + nameOrPath + '"; f=""; '
+            + 'if [ "${n#/}" != "$n" ]; then f="$n"; else '
+            + 'for d in /usr/share/sounds/ocean/stereo /usr/share/sounds/freedesktop/stereo /usr/share/sounds/Oxygen/stereo "$HOME/.local/share/sounds"; do '
+            + 'for e in oga ogg wav; do [ -r "$d/$n.$e" ] && { f="$d/$n.$e"; break 2; }; done; done; fi; '
+            + '[ -n "$f" ] && [ -r "$f" ] || exit 3; '
+            + 'L=' + Math.max(0, Math.min(2000, parseInt(leadInMs) || 0)) + '; '
+            // a short silent stream first: it wakes a suspended audio device, which would
+            // otherwise swallow the start (or all) of a short sound
+            + 'if [ "$L" -gt 0 ] && command -v paplay >/dev/null 2>&1; then '
+            + 'head -c $((L * 192)) /dev/zero | paplay --raw --rate=48000 --channels=2 --format=s16le >/dev/null 2>&1; fi; '
+            // paplay first: it plays the file itself and reports real errors; canberra last, because it
+            // can report success while its own "event sounds" setting keeps it silent
+            + 'for p in paplay pw-play "ffplay -nodisp -autoexit -loglevel quiet" "mpv --no-video --really-quiet" "play -q" "canberra-gtk-play -f"; do '
+            + 'set -- $p; command -v "$1" >/dev/null 2>&1 || continue; '
+            + '"$@" "$f" >/dev/null 2>&1 && { echo "$1 $f"; exit 0; }; done; exit 4'
+        exec.connectSource("sh -c '" + script + "' # snp-sound-" + Date.now())
+    }
+
     function restartShell() {
         exec.connectSource("sh -c 'systemctl --user restart --no-block plasma-plasmashell.service "
                            + "|| (kquitapp6 plasmashell; sleep 1; setsid kstart plasmashell)' # snp-restart")
@@ -2710,7 +2822,16 @@ Item {
         connectedSources: []
         onNewData: (source, data) => {
             disconnectSource(source)
-            if (source.indexOf("# snp-install") !== -1) {
+            if (source.indexOf("# snp-sound") !== -1) {
+                const code = data["exit code"]
+                if (code === 0) {
+                    soundPlayed(String(data["stdout"] || "").trim())
+                } else if (code === 3) {
+                    soundFailed(i18n("The sound file was not found."))
+                } else if (code !== 0) {
+                    soundFailed(i18n("No sound player worked. Install one of: pipewire-utils (pw-play), pulseaudio-utils (paplay), libcanberra or ffmpeg."))
+                }
+            } else if (source.indexOf("# snp-install") !== -1) {
                 if (data["exit code"] === 0) {
                     state = "installed"
                 } else {
@@ -2728,6 +2849,7 @@ import QtQuick.Controls as QQC2
 import QtQuick.Layouts
 import org.kde.kirigami as Kirigami
 import org.kde.kcmutils as KCM
+import QtQuick.Dialogs
 
 KCM.SimpleKCM {
     property alias cfg_groupMode: groupCombo.currentIndex
@@ -2735,6 +2857,10 @@ KCM.SimpleKCM {
     property alias cfg_relativeTimes: relativeCheck.checked
     property alias cfg_markReadOnHover: hoverCheck.checked
     property alias cfg_popupsEnabled: popupCheck.checked
+    property alias cfg_soundEnabled: soundCheck.checked
+    property alias cfg_soundChoice: soundCombo.currentIndex
+    property alias cfg_soundFile: soundFileField.text
+    property alias cfg_soundLeadIn: leadSpin.value
     property alias cfg_historyEnabled: historyCheck.checked
     property alias cfg_historyDays: historyDaysSpin.value
 
@@ -2775,6 +2901,115 @@ KCM.SimpleKCM {
             wrapMode: Text.Wrap
             opacity: 0.7
             text: i18n("Switched off, notifications still arrive here and the handle still counts and blinks, but Plasma shows no pop-up. This works by holding Plasma's notifications back, the same way as Do Not Disturb, so notification sounds are silenced too, and urgent (critical) notifications may still pop up if Plasma is set to allow that in Do Not Disturb mode.")
+        }
+
+        QQC2.Label {
+            Kirigami.FormData.isSection: true
+            Kirigami.FormData.label: i18n("Sound")
+        }
+
+        QQC2.CheckBox {
+            id: soundCheck
+            Kirigami.FormData.label: i18n("New notification:")
+            text: i18n("Play a sound")
+        }
+
+        QQC2.ComboBox {
+            id: soundCombo
+            Kirigami.FormData.label: i18n("Sound:")
+            enabled: soundCheck.checked
+            model: [i18n("Message"), i18n("Message (short)"), i18n("Bell"), i18n("Complete"),
+                    i18n("Information"), i18n("My own file...")]
+            onActivated: index => {
+                if (index === 5) {
+                    soundDialog.open()
+                }
+            }
+        }
+
+        RowLayout {
+            Kirigami.FormData.label: i18n("Sound file:")
+            enabled: soundCheck.checked && soundCombo.currentIndex === 5
+            QQC2.TextField {
+                id: soundFileField
+                placeholderText: i18n("/path/to/sound.oga or .wav")
+                Layout.preferredWidth: Kirigami.Units.gridUnit * 14
+            }
+            QQC2.Button {
+                icon.name: "document-open"
+                text: i18n("Browse...")
+                onClicked: soundDialog.open()
+            }
+        }
+
+        FileDialog {
+            id: soundDialog
+            title: i18n("Choose a sound file")
+            nameFilters: [i18n("Sound files (*.oga *.ogg *.wav *.mp3 *.flac)"), i18n("All files (*)")]
+            onAccepted: soundFileField.text = decodeURIComponent(String(selectedFile).replace(/^file:\/\//, ""))
+        }
+
+        QQC2.SpinBox {
+            id: leadSpin
+            Kirigami.FormData.label: i18n("Warm-up:")
+            enabled: soundCheck.checked
+            from: 0
+            to: 2000
+            stepSize: 100
+            editable: true
+            textFromValue: function(value) { return i18n("%1 ms", value) }
+            valueFromText: function(text) { return parseInt(text) || 0 }
+        }
+
+        QQC2.Label {
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 22
+            wrapMode: Text.Wrap
+            opacity: 0.7
+            text: i18n("Silence played just before the sound. Sound cards go to sleep when idle and can swallow the start of a short sound; a warm-up of a few hundred milliseconds usually prevents that (the default is 1000 ms). Set 0 to turn it off.")
+        }
+
+        QQC2.Button {
+            Kirigami.FormData.label: i18n("Try it:")
+            text: i18n("Play sound")
+            icon.name: "media-playback-start"
+            enabled: testLoader.item !== null
+            onClicked: {
+                testStatus.text = ""
+                const names = ["message", "message-new-instant", "bell", "complete", "dialog-information"]
+                const what = soundCombo.currentIndex >= 5 ? soundFileField.text : names[soundCombo.currentIndex]
+                if (!what) {
+                    testStatus.text = i18n("Choose a sound file first.")
+                } else {
+                    testLoader.item.play(what, leadSpin.value)
+                }
+            }
+        }
+
+        QQC2.Label {
+            id: testStatus
+            visible: text.length > 0
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 22
+            wrapMode: Text.WrapAnywhere
+            opacity: 0.8
+        }
+
+        Loader {
+            id: testLoader
+            source: "Updater.qml"
+        }
+
+        Connections {
+            target: testLoader.item
+            ignoreUnknownSignals: true
+            function onSoundPlayed(info) { testStatus.text = i18n("Played with: %1", info) }
+            function onSoundFailed(text) { testStatus.text = text }
+        }
+
+        QQC2.Label {
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 22
+            wrapMode: Text.Wrap
+            opacity: 0.7
+            text: i18n("Plays when an unread notification arrives while the panel is closed and Do Not Disturb is off. Some apps also make their own sound through Plasma; change that in System Settings > Notifications. Needs one of: canberra-gtk-play, paplay, pw-play or ffplay. If it fails, the panel opens and says why. \"Play sound\" here plays right away, without Apply, and tells you which player was used. If a sound is reported as played but you hear nothing, check the volume of the \"paplay\" stream under Applications in Plasma's volume control while it plays.")
         }
 
         QQC2.Label {
@@ -3104,10 +3339,13 @@ KCM.SimpleKCM {
     id: page
 
     readonly property var news: [
-        i18n("Updates from GitHub: the app can look for a new release (automatically once a day, or with \"Check for updates\" in the right-click menu or Configure > Updates). A banner at the top of the panel offers to download and install it in the background; your settings are kept. No GitHub account is needed."),
-        i18n("Fixed: long notifications in the history were cut off; they now have a \"Show more\" link."),
-        i18n("Fixed: notification text in the history showed raw markup; it now displays like in the list.")
+        i18n("Sound test: \"Play sound\" in the settings now plays immediately, without Apply, and shows which player was used. paplay is tried first."),
+        i18n("Sound sometimes silent: a new \"Warm-up\" setting plays a moment of silence first, so a sleeping sound card is awake when the sound starts."),
+        i18n("Sound fixes: sounds are now found in the installed sound themes (Ocean, freedesktop), more players are tried, \"My own file\" opens a file browser, and a failing sound now explains why in the panel."),
+        i18n("Sound: an option (General) to play a sound when a new notification arrives, with a choice of sounds or your own file and a button to try it."),
+        i18n("About page: website, copyright and author now point to the project on GitHub.")
     ]
+
 
 
 
@@ -3117,6 +3355,8 @@ KCM.SimpleKCM {
             [i18n("Lines before \"Show more\""), i18n("How many lines of a long message are shown before it is folded.")],
             [i18n("Relative times"), i18n("Show \"5 min ago\" instead of the clock time.")],
             [i18n("Mark as read on hover"), i18n("Notifications count as read once you hover the open panel.")],
+            [i18n("Warm-up"), i18n("Milliseconds of silence played before the sound so a sleeping audio device wakes up first. 0 turns it off.")],
+            [i18n("Play a sound"), i18n("Plays a sound when an unread notification arrives while the panel is closed. Choose a built-in sound or your own file; \"Play sound\" tries it.")],
             [i18n("Keep a history"), i18n("Remembers notifications after Clear All and restarts. Open it with the history button at the top of the panel.")],
             [i18n("Keep for"), i18n("How many days back the history is kept (1 to 365).")],
             [i18n("Pop-ups"), i18n("Turns Plasma's own pop-up for each new notification on or off. Off holds notifications back like Do Not Disturb, so sounds are silenced too; they still arrive in this panel.")]
@@ -3161,7 +3401,7 @@ KCM.SimpleKCM {
 
         Kirigami.Heading {
             level: 3
-            text: i18n("What's new in 2.2")
+            text: i18n("What's new in 2.3.3")
             Layout.topMargin: Kirigami.Units.largeSpacing
         }
         Kirigami.Separator { Layout.fillWidth: true }
@@ -3433,6 +3673,8 @@ ${b}Other options${r}  (right-click the handle, then Configure)
            notifications (and how many); custom colours; blink never,
            a few times, or until you open the panel.
   Readme   a short description of the app and of every option.
+  Sound    play a sound for a new notification (off by default): pick a
+           built-in sound or your own file.
   Updates  GitHub repository, check once a day, install without asking,
            check now. A banner in the panel offers new versions; no
            GitHub account is needed for a public repository.
