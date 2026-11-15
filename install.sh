@@ -174,7 +174,7 @@ extract_package() {
         "Icon": "notification-active",
         "Category": "Utilities",
         "License": "GPL-2.0+",
-        "Version": "2.4.0",
+        "Version": "2.6.0",
         "Copyright": "Copyright © Mikroner",
         "Website": "https://github.com/mikroner/Plasma_Notification_SidePanel",
         "Authors": [
@@ -196,6 +196,14 @@ __SNP_EOF__
       xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0 http://www.kde.org/standards/kcfg/1.0/kcfg.xsd">
     <kcfgfile name=""/>
     <group name="General">
+        <!-- groups (by app) without unread notifications start collapsed -->
+        <entry name="groupAutoCollapse" type="Bool">
+            <default>true</default>
+        </entry>
+        <!-- one-line previews of the newest notifications shown in a collapsed group (0-2) -->
+        <entry name="collapsedPreview" type="Int">
+            <default>2</default>
+        </entry>
         <!-- 0 = by date, 1 = by app, 2 = none -->
         <entry name="groupMode" type="Int">
             <default>1</default>
@@ -227,6 +235,11 @@ __SNP_EOF__
         <!-- milliseconds of silence played first, so a sleeping audio device wakes up before the sound -->
         <entry name="soundLeadIn" type="Int">
             <default>1000</default>
+        </entry>
+        <!-- tint cards by application: 0 = no, 1 = a colour from the app's name, 2 = from its icon.
+             -1 = never chosen: the default (2) applies, and whatever the user picks is kept -->
+        <entry name="cardColorMode" type="Int">
+            <default>-1</default>
         </entry>
         <!-- keep a history of notifications that survives Clear All and restarts -->
         <entry name="historyEnabled" type="Bool">
@@ -401,7 +414,9 @@ PlasmoidItem {
     property int unreadCount: 0
     property int totalCount: 0
     property string filterText: ""
-    property var collapsed: ({})              // section key -> true when collapsed
+    property var collapsed: ({})              // section key -> true/false: set by hand, wins over the automatic state
+    property var autoExpanded: ({})           // section key -> true: has unread notifications (stays open while the panel is open)
+    property var unreadBy: ({})               // app name -> number of unread notifications
     property var sectionInfo: ({})            // section key -> {name, icon, count}
     property bool dndPicking: false
     property bool compactHover: false         // pointer over the handle
@@ -700,6 +715,8 @@ PlasmoidItem {
         let unread = 0
         const apps = []
         const seenApps = {}
+        const rankOf = {}
+        const unreadNow = {}
 
         for (let i = 0; i < mirror.count; ++i) {
             const o = mirror.objectAt(i)
@@ -719,6 +736,10 @@ PlasmoidItem {
             }
             if (q && (o.summary + " " + o.body + " " + appName).toLowerCase().indexOf(q) === -1) {
                 continue
+            }
+            rankOf[appName] = (rankOf[appName] || 0) + 1
+            if (isUnread) {
+                unreadNow[appName] = (unreadNow[appName] || 0) + 1
             }
             const urls = []
             for (const u of (o.urls || [])) {
@@ -746,7 +767,8 @@ PlasmoidItem {
                 jobRunning: o.jobState === 1,
                 percentage: o.percentage,
                 bucket: bucketOf(ms),
-                appKey: appName
+                appKey: appName,
+                rank: rankOf[appName] - 1       // 0 = the newest of its app
             }
             row.sig = JSON.stringify(row)
             row.image = o.image || ""
@@ -817,6 +839,8 @@ PlasmoidItem {
             }
         }
 
+        updateGroupState(unreadNow)
+
         if (unread > prevUnread && !dndActive && !isOpen) {
             newNotification()
         }
@@ -859,10 +883,65 @@ PlasmoidItem {
         }
     }
 
-    function toggleCollapsed(key) {
+    // Is this app's group collapsed? A hand-made choice wins; otherwise a group is open while it
+    // has unread notifications (and, when the option is off, always).
+    function isGroupCollapsed(key) {
+        if (filterText.trim() !== "") {
+            return false
+        }
+        const o = collapsed[key]
+        if (o !== undefined) {
+            return o
+        }
+        return Plasmoid.configuration.groupAutoCollapse && !autoExpanded[key]
+    }
+
+    // "Title  text of the message" on one line, for the collapsed previews
+    function oneLine(summary, body) {
+        const esc = t => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        const plain = String(body).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim()
+        return "<b>" + esc(summary) + "</b>" + (plain !== "" ? "  " + plain : "")
+    }
+
+    function setCollapsed(key, value) {
         const c = Object.assign({}, collapsed)
-        c[key] = !c[key]
+        c[key] = value
         collapsed = c
+    }
+
+    function toggleCollapsed(key) {
+        setCollapsed(key, !isGroupCollapsed(key))
+    }
+
+    // Called after every refresh: a group with new unread notifications opens by itself.
+    function updateGroupState(unreadNow) {
+        let ae = null
+        let co = null
+        for (const k in unreadNow) {
+            if (!autoExpanded[k]) {
+                ae = ae || Object.assign({}, autoExpanded)
+                ae[k] = true
+            }
+            if (unreadNow[k] > (unreadBy[k] || 0) && collapsed[k] !== undefined) {
+                co = co || Object.assign({}, collapsed)
+                delete co[k]
+            }
+        }
+        if (ae) autoExpanded = ae
+        if (co) collapsed = co
+        unreadBy = unreadNow
+    }
+
+    // When the panel closes, groups that are read now fold up again for the next time.
+    onIsOpenChanged: {
+        if (!isOpen) {
+            const ae = {}
+            for (const k in unreadBy) {
+                ae[k] = true
+            }
+            autoExpanded = ae
+            collapsed = ({})
+        }
     }
 
     // 0 = off, a time = until then, root.foreverMs = until turned off
@@ -909,6 +988,82 @@ PlasmoidItem {
     Timer {
         id: dndTimer
         onTriggered: root.scheduleDnd()
+    }
+
+    // ---- colours per application ----------------------------------------------
+    property var iconColors: ({})              // app name -> colour found in its icon ("" = none)
+    property var iconColorAsked: ({})
+
+    Loader {
+        id: pickerLoader
+        source: "IconColorPicker.qml"
+        onStatusChanged: {
+            if (status === Loader.Error) {
+                console.warn("Side Notification Panel: icon colours unavailable")
+            }
+        }
+    }
+
+    property var iconApps: ({})                // icon name -> app name waiting for its icon file
+
+    Connections {
+        target: root.updater
+        ignoreUnknownSignals: true
+        function onIconFound(name, path) {
+            const app = root.iconApps[name] || name
+            if (path !== "" && pickerLoader.item) {
+                pickerLoader.item.request(app, path)
+            } else {
+                root.setIconColor(app, "")
+            }
+        }
+    }
+
+    function setIconColor(name, color) {
+        const c = Object.assign({}, root.iconColors)
+        c[name] = color
+        root.iconColors = c
+    }
+
+    Connections {
+        target: pickerLoader.item
+        ignoreUnknownSignals: true
+        function onPicked(name, color) {
+            const c = Object.assign({}, root.iconColors)
+            c[name] = color
+            root.iconColors = c
+        }
+    }
+
+    // a steady colour made from the app's name
+    function nameColor(name) {
+        let h = 2166136261
+        for (let i = 0; i < name.length; ++i) {
+            h = ((h ^ name.charCodeAt(i)) * 16777619) >>> 0
+        }
+        return Qt.hsla((h % 360) / 360, 0.55, 0.5, 1).toString()
+    }
+
+    // "" = do not colour cards
+    function appColorFor(appName, iconName) {
+        const chosen = Plasmoid.configuration.cardColorMode
+        const mode = chosen < 0 ? 2 : chosen      // -1: not chosen yet, the default is the icon colour
+        if (mode === 0) {
+            return ""
+        }
+        const key = appName || i18n("System")
+        if (mode === 2) {
+            const found = iconColors[key]
+            if (found) {
+                return found
+            }
+            if (found === undefined && !iconColorAsked[key] && pickerLoader.item && updater) {
+                iconColorAsked[key] = true
+                iconApps[iconName || key] = key
+                updater.findIcon(iconName || key)
+            }
+        }
+        return nameColor(key)
     }
 
     // ---- sound on a new notification ------------------------------------------
@@ -1020,7 +1175,7 @@ PlasmoidItem {
 
     // After an install or update, open the settings once (on the Readme, its first page)
     // so the list of what is new is seen. Keep in step with metadata.json.
-    readonly property string releaseVersion: "2.4.0"
+    readonly property string releaseVersion: "2.6.0"
     Timer {
         id: readmeTimer
         interval: 4000
@@ -1248,8 +1403,8 @@ PlasmoidItem {
             property bool confirmClear: false
             property bool confirmHistoryClear: false
 
-            Binding { target: root; property: "popupHover"; value: panelHover.hovered; when: !root.edgeDrawer }
-            Binding { target: root; property: "searchTyping"; value: searchField.activeFocus || historySearch.activeFocus }
+            Binding { target: root; property: "popupHover"; value: !!panelHover.hovered; when: !root.edgeDrawer }
+            Binding { target: root; property: "searchTyping"; value: !!(searchField.activeFocus || historySearch.activeFocus) }
 
             // Mark everything as seen once the panel has been looked at for a moment.
             HoverHandler { id: panelHover }
@@ -1569,10 +1724,25 @@ PlasmoidItem {
                         required property string section
                         readonly property var info: root.sectionInfo[section] || ({ name: section, icon: "", count: 0 })
                         readonly property bool byApp: list.groupMode === 1
-                        readonly property bool isCollapsed: byApp && !!root.collapsed[section]
+                        readonly property bool isCollapsed: byApp && root.isGroupCollapsed(section)
 
                         width: ListView.view.width
                         height: headerRow.implicitHeight + Kirigami.Units.largeSpacing
+
+                        // the app's colour, as for its cards but 20% stronger (0.15 -> 0.18)
+                        readonly property string tint: byApp ? root.appColorFor(info.name, info.icon) : ""
+
+                        Rectangle {
+                            visible: header.tint !== ""
+                            anchors {
+                                fill: parent
+                                leftMargin: Kirigami.Units.smallSpacing
+                                rightMargin: Kirigami.Units.smallSpacing
+                                topMargin: Kirigami.Units.smallSpacing / 2
+                            }
+                            radius: Kirigami.Units.cornerRadius
+                            color: header.tint !== "" ? Qt.alpha(header.tint, 0.18) : "transparent"
+                        }
 
                         TapHandler {
                             enabled: header.byApp
@@ -1627,13 +1797,86 @@ PlasmoidItem {
 
                     delegate: Item {
                         id: wrapper
-                        readonly property bool isCollapsed: list.groupMode === 1 && !!root.collapsed[model.appKey]
+                        readonly property bool isCollapsed: list.groupMode === 1 && root.isGroupCollapsed(model.appKey)
+                        // a collapsed group still shows the newest one or two as a single line
+                        readonly property bool showPreview: isCollapsed && model.rank < Plasmoid.configuration.collapsedPreview
+                        // the line after the last preview: ". . . . . ." says there are more in the group
+                        readonly property bool showMore: isCollapsed && Plasmoid.configuration.collapsedPreview > 0
+                                                         && model.rank === Plasmoid.configuration.collapsedPreview
                         readonly property int gutter: Kirigami.Units.smallSpacing
 
                         width: ListView.view.width
-                        height: isCollapsed ? 0 : card.height + gutter
+                        height: isCollapsed ? (showPreview ? preview.height + gutter : (showMore ? moreCard.height + gutter : 0)) : card.height + gutter
                         visible: height > 0.5
                         clip: true
+
+                        // the dots sit in a tinted card of their own, so they read as part of the group
+                        Rectangle {
+                            id: moreCard
+                            visible: wrapper.showMore
+                            x: wrapper.gutter
+                            width: wrapper.width - wrapper.gutter * 2
+                            height: moreLabel.implicitHeight + Kirigami.Units.smallSpacing
+                            radius: Kirigami.Units.cornerRadius
+                            readonly property string tint: root.appColorFor(model.appName, model.appIcon)
+                            color: tint !== "" ? Qt.alpha(tint, 0.15) : Qt.alpha(Kirigami.Theme.textColor, 0.06)
+
+                            Rectangle {
+                                visible: moreCard.tint !== ""
+                                anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
+                                width: 3
+                                radius: 1.5
+                                color: moreCard.tint
+                                opacity: 0.55
+                            }
+                            PlasmaComponents3.Label {
+                                id: moreLabel
+                                anchors.centerIn: parent
+                                text: ". . . . . ."
+                                opacity: 0.7
+                                font.bold: true
+                            }
+                            HoverHandler { cursorShape: Qt.PointingHandCursor }
+                            TapHandler { onTapped: root.setCollapsed(model.appKey, false) }
+                        }
+
+                        Rectangle {
+                            id: preview
+                            visible: wrapper.showPreview
+                            x: wrapper.gutter
+                            width: wrapper.width - wrapper.gutter * 2
+                            height: previewLabel.implicitHeight + Kirigami.Units.smallSpacing * 2
+                            radius: Kirigami.Units.cornerRadius
+                            readonly property string tint: root.appColorFor(model.appName, model.appIcon)
+                            color: tint !== "" ? Qt.alpha(tint, 0.15) : Qt.alpha(Kirigami.Theme.textColor, 0.06)
+
+                            Rectangle {
+                                visible: preview.tint !== ""
+                                anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
+                                width: 3
+                                radius: 1.5
+                                color: preview.tint
+                                opacity: 0.55
+                            }
+                            PlasmaComponents3.Label {
+                                id: previewLabel
+                                anchors {
+                                    left: parent.left; right: parent.right
+                                    verticalCenter: parent.verticalCenter
+                                    leftMargin: Kirigami.Units.largeSpacing
+                                    rightMargin: Kirigami.Units.smallSpacing
+                                }
+                                text: root.oneLine(model.summary, model.body)
+                                textFormat: Text.StyledText
+                                wrapMode: Text.NoWrap
+                                maximumLineCount: 1
+                                elide: Text.ElideRight
+                                font: Kirigami.Theme.smallFont
+                                opacity: 0.85
+                            }
+                            HoverHandler { cursorShape: Qt.PointingHandCursor }
+                            TapHandler { onTapped: root.setCollapsed(model.appKey, false) }
+                        }
 
                         Behavior on height {
                             NumberAnimation { duration: Kirigami.Units.shortDuration; easing.type: Easing.OutCubic }
@@ -1641,6 +1884,7 @@ PlasmoidItem {
 
                         NotificationCard {
                             id: card
+                            visible: !wrapper.isCollapsed
                             x: wrapper.gutter
                             width: wrapper.width - wrapper.gutter * 2
 
@@ -1648,6 +1892,7 @@ PlasmoidItem {
                             body: model.body
                             appName: model.appName
                             appIcon: model.appIcon
+                            appColor: root.appColorFor(model.appName, model.appIcon)
                             image: model.image
                             timeText: root.formatTime(model.ms, root.nowMs)
                             unread: model.unread
@@ -1757,14 +2002,28 @@ PlasmoidItem {
                         leftPadding: Kirigami.Units.largeSpacing
                         opacity: 0.8
                     }
-                    delegate: ColumnLayout {
+                    delegate: Rectangle {
                         required property string summary
                         required property string body
                         required property string appName
                         required property string appIcon
                         required property double ms
                         property bool expanded: false
+                        readonly property string tint: root.appColorFor(appName, appIcon)
                         width: historyList.width
+                        height: histInner.implicitHeight
+                        color: tint !== "" ? Qt.alpha(tint, 0.12) : "transparent"
+
+                        Rectangle {
+                            visible: parent.tint !== ""
+                            width: 3
+                            height: parent.height
+                            color: parent.tint
+                        }
+
+                        ColumnLayout {
+                        id: histInner
+                        width: parent.width
                         spacing: 0
                         RowLayout {
                             Layout.fillWidth: true
@@ -1833,6 +2092,7 @@ PlasmoidItem {
                         Kirigami.Separator {
                             Layout.fillWidth: true
                             opacity: 0.5
+                        }
                         }
                     }
 
@@ -2097,6 +2357,7 @@ Item {
     property string body
     property string appName
     property string appIcon
+    property string appColor: ""          // tint for this app's cards; empty = none
     property var image
     property string timeText
     property bool unread: false
@@ -2167,9 +2428,11 @@ Item {
         width: parent.width
         height: content.height + card.vPad * 2
         radius: Kirigami.Units.cornerRadius
-        color: hover.hovered
-               ? Qt.alpha(Kirigami.Theme.highlightColor, 0.14)
-               : Qt.alpha(Kirigami.Theme.textColor, 0.06)
+        color: card.appColor !== ""
+               ? Qt.alpha(card.appColor, hover.hovered ? 0.26 : 0.15)
+               : hover.hovered
+                 ? Qt.alpha(Kirigami.Theme.highlightColor, 0.14)
+                 : Qt.alpha(Kirigami.Theme.textColor, 0.06)
         border.width: card.isCurrent ? 2 : 0
         border.color: Kirigami.Theme.highlightColor
         opacity: 1 - Math.min(Math.abs(x) / (width * 0.9), 1)
@@ -2195,11 +2458,13 @@ Item {
         Rectangle {
             // urgency values are flags in plasma-workspace: low=1, normal=2, critical=4
             readonly property bool critical: card.urgency >= 4
-            visible: critical || card.unread
+            visible: critical || card.unread || card.appColor !== ""
             anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
             width: 3
             radius: 1.5
-            color: critical ? Kirigami.Theme.negativeTextColor : Kirigami.Theme.highlightColor
+            opacity: critical || card.unread ? 1 : 0.55
+            color: critical ? Kirigami.Theme.negativeTextColor
+                            : (card.appColor !== "" ? card.appColor : Kirigami.Theme.highlightColor)
         }
 
         HoverHandler {
@@ -2789,6 +3054,28 @@ Item {
 
     signal soundFailed(string text)
     signal soundPlayed(string info)
+    signal iconFound(string name, string path)     // path is "" when no icon file was found
+
+    // Looks up the icon file of an icon name in the usual places (an absolute path is used as is).
+    // SVG is preferred, else the largest PNG.
+    function findIcon(name) {
+        if (!nameOk(name)) {
+            iconFound(name, "")
+            return
+        }
+        const script = 'n="' + name + '"; '
+            + 'if [ "${n#/}" != "$n" ]; then [ -r "$n" ] && echo "$n"; exit 0; fi; '
+            + 'for d in "$HOME/.local/share/icons" "$HOME/.icons" "$HOME/.local/share/flatpak/exports/share/icons" '
+            + '/var/lib/flatpak/exports/share/icons /usr/share/icons/hicolor /usr/share/icons/breeze /usr/share/icons /usr/share/pixmaps; do '
+            + '[ -d "$d" ] || continue; '
+            + 'find "$d" -maxdepth 6 \\( -type f -o -type l \\) \\( -name "$n.svg" -o -name "$n.png" \\) 2>/dev/null; done '
+            // score: SVG first, else the larger PNG
+            + '| while read -r f; do case "$f" in *.svg) s=100000;; *) s=$(echo "$f" | grep -oE "[0-9]+x[0-9]+" | head -1 | cut -dx -f1); s=${s:-1};; esac; echo "$s $f"; done '
+            + '| sort -rn | head -1 | cut -d" " -f2-'
+        iconCmds[name] = true
+        exec.connectSource("sh -c '" + script + "' # snp-icon:" + name)
+    }
+    property var iconCmds: ({})
 
     property var lastSound: ({ what: "", lead: 0 })
 
@@ -2866,7 +3153,10 @@ Item {
         connectedSources: []
         onNewData: (source, data) => {
             disconnectSource(source)
-            if (source.indexOf("# snp-resolve") !== -1) {
+            if (source.indexOf("# snp-icon:") !== -1) {
+                iconFound(source.substring(source.indexOf("# snp-icon:") + 11),
+                          String(data["stdout"] || "").trim().split("\n")[0])
+            } else if (source.indexOf("# snp-resolve") !== -1) {
                 const path = String(data["stdout"] || "").trim()
                 if (data["exit code"] === 0 && path !== "") {
                     media.playFile(path, lastSound.lead)
@@ -2969,6 +3259,133 @@ Item {
 }
 __SNP_EOF__
     mkdir -p "$PKG/contents/ui"
+    cat > "$PKG/contents/ui/IconColorPicker.qml" <<'__SNP_EOF__'
+import QtQuick
+
+// Finds the main colour of an app icon file: it is drawn into a canvas and its pixels are
+// counted by hue (grey, white and black pixels are ignored). One icon at a time.
+// Loaded through a Loader, so the widget keeps working if anything here fails; the caller then
+// uses a colour made from the app's name instead.
+Item {
+    id: picker
+    width: 0
+    height: 0
+
+    // an empty colour means "no clear colour found"
+    signal picked(string name, string color)
+
+    property var queue: []
+    property bool busy: false
+    property var current: null
+
+    function request(name, icon) {
+        queue.push({ name: name, icon: icon })
+        if (!busy) {
+            next()
+        }
+    }
+
+    function next() {
+        if (queue.length === 0) {
+            busy = false
+            return
+        }
+        busy = true
+        current = queue.shift()
+        const path = String(current.icon || "")
+        if (path === "") {
+            finish("")
+            return
+        }
+        const url = "file://" + encodeURI(path)
+        cv.pendingUrl = url
+        watchdog.restart()
+        cv.loadImage(url)
+    }
+
+    function finish(color) {
+        watchdog.stop()
+        const c = current
+        current = null
+        if (c) {
+            picked(c.name, color)
+        }
+        next()
+    }
+
+    Timer {
+        id: watchdog
+        interval: 2500
+        onTriggered: picker.finish("")
+    }
+
+    Canvas {
+        id: cv
+        width: 32
+        height: 32
+        x: -200
+        renderTarget: Canvas.Image
+        renderStrategy: Canvas.Immediate
+        property string pendingUrl: ""
+
+        onImageLoaded: requestPaint()
+
+        onPaint: {
+            if (!picker.current || pendingUrl === "" || !isImageLoaded(pendingUrl)) {
+                return
+            }
+            const ctx = getContext("2d")
+            ctx.clearRect(0, 0, 32, 32)
+            ctx.drawImage(pendingUrl, 0, 0, 32, 32)
+            const px = ctx.getImageData(0, 0, 32, 32).data
+            const bins = 12
+            const weight = new Array(bins).fill(0)
+            const sr = new Array(bins).fill(0)
+            const sg = new Array(bins).fill(0)
+            const sb = new Array(bins).fill(0)
+            for (let i = 0; i < px.length; i += 4) {
+                const a = px[i + 3] / 255
+                if (a < 0.5) {
+                    continue
+                }
+                const r = px[i] / 255, g = px[i + 1] / 255, b = px[i + 2] / 255
+                const mx = Math.max(r, g, b), mn = Math.min(r, g, b)
+                const d = mx - mn
+                const sat = mx === 0 ? 0 : d / mx
+                if (sat < 0.3 || mx < 0.25 || (mx > 0.97 && sat < 0.45)) {
+                    continue
+                }
+                let h
+                if (mx === r) h = ((g - b) / d) % 6
+                else if (mx === g) h = (b - r) / d + 2
+                else h = (r - g) / d + 4
+                h = (h * 60 + 360) % 360
+                const k = Math.floor(h / (360 / bins)) % bins
+                const w = sat * a
+                weight[k] += w
+                sr[k] += r * w
+                sg[k] += g * w
+                sb[k] += b * w
+            }
+            let best = -1, bw = 0
+            for (let k = 0; k < bins; ++k) {
+                if (weight[k] > bw) {
+                    bw = weight[k]
+                    best = k
+                }
+            }
+            // too few coloured pixels: the icon is grey, black or white
+            if (best < 0 || bw < 4) {
+                picker.finish("")
+                return
+            }
+            const c = Qt.rgba(sr[best] / weight[best], sg[best] / weight[best], sb[best] / weight[best], 1)
+            picker.finish(c.toString())
+        }
+    }
+}
+__SNP_EOF__
+    mkdir -p "$PKG/contents/ui"
     cat > "$PKG/contents/ui/configGeneral.qml" <<'__SNP_EOF__'
 import QtQuick
 import QtQuick.Controls as QQC2
@@ -2980,6 +3397,11 @@ import QtQuick.Dialogs
 KCM.SimpleKCM {
     property alias cfg_groupMode: groupCombo.currentIndex
     property alias cfg_bodyLines: linesSpin.value
+    property alias cfg_groupAutoCollapse: autoCollapseCheck.checked
+    property alias cfg_collapsedPreview: previewSpin.value
+    // -1 means "never chosen" (the icon colour applies); only a click on the list stores a choice
+    property int cfg_cardColorMode: -1
+    onCfg_cardColorModeChanged: colorCombo.currentIndex = cfg_cardColorMode < 0 ? 2 : cfg_cardColorMode
     property alias cfg_relativeTimes: relativeCheck.checked
     property alias cfg_markReadOnHover: hoverCheck.checked
     property alias cfg_popupsEnabled: popupCheck.checked
@@ -2998,6 +3420,28 @@ KCM.SimpleKCM {
             model: [i18n("By date"), i18n("By application"), i18n("Don't group")]
         }
 
+        QQC2.CheckBox {
+            id: autoCollapseCheck
+            Kirigami.FormData.label: i18n("App groups:")
+            text: i18n("Fold up groups that have no unread notifications")
+        }
+
+        QQC2.SpinBox {
+            id: previewSpin
+            Kirigami.FormData.label: i18n("Lines in a folded group:")
+            from: 0
+            to: 2
+            textFromValue: function(value) { return value === 0 ? i18n("none") : i18np("%1 line", "%1 lines", value) }
+            valueFromText: function(text) { return parseInt(text) || 0 }
+        }
+
+        QQC2.Label {
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 22
+            wrapMode: Text.Wrap
+            opacity: 0.7
+            text: i18n("When notifications are grouped by application: groups with unread notifications are open, the others are folded and show their newest one or two notifications as a single line. Click a line or the group's name to open or fold it. A group opens by itself when something new arrives; read groups fold up when the panel closes.")
+        }
+
         QQC2.SpinBox {
             id: linesSpin
             Kirigami.FormData.label: i18n("Lines of text before \"Show more\":")
@@ -3009,6 +3453,24 @@ KCM.SimpleKCM {
             id: relativeCheck
             Kirigami.FormData.label: i18n("Times:")
             text: i18n("Show relative times (\"5 min ago\")")
+        }
+
+        QQC2.ComboBox {
+            id: colorCombo
+            Kirigami.FormData.label: i18n("Card colours:")
+            model: [i18n("None"), i18n("A colour for each app (from its name)"), i18n("The app icon's colour")]
+            currentIndex: 2
+            onActivated: index => cfg_cardColorMode = index
+        }
+
+        QQC2.Label {
+            Layout.maximumWidth: Kirigami.Units.gridUnit * 22
+            wrapMode: Text.Wrap
+            opacity: 0.7
+            visible: colorCombo.currentIndex > 0
+            text: colorCombo.currentIndex === 2
+                  ? i18n("Takes the main colour of each app's icon. Icons without a clear colour (grey, black or white) get a colour made from the app's name.")
+                  : i18n("Each app always gets the same colour, made from its name.")
         }
 
         QQC2.CheckBox {
@@ -3473,6 +3935,9 @@ KCM.SimpleKCM {
     id: page
 
     readonly property var news: [
+        i18n("Folded groups: with grouping by app, groups without unread notifications fold up and show their newest one or two notifications as one line, followed by a line of dots when there are more; groups with unread notifications stay open. Both can be changed in General."),
+        i18n("Group headers (grouped by app) are tinted with the app's colour, slightly stronger than its cards. The icon colour is now the default for new installs; a colour you chose is kept."),
+        i18n("Card colours: notifications can be tinted per app (General): a colour made from the app's name, or the main colour of its icon (the default). Also used in the history."),
         i18n("Sound player: sounds are now played by the widget itself (Qt Multimedia) with no external program; the system commands (paplay...) are used as a fallback, or on request in General > Sound > Player."),
         i18n("Sound test: \"Play sound\" in the settings now plays immediately, without Apply, and shows which player was used. paplay is tried first."),
         i18n("Sound sometimes silent: a new \"Warm-up\" setting plays a moment of silence first, so a sleeping sound card is awake when the sound starts."),
@@ -3487,7 +3952,9 @@ KCM.SimpleKCM {
     readonly property var sections: [
         { title: i18n("General"), items: [
             [i18n("Group notifications"), i18n("How the list is organised: by date (Today, Yesterday...), by application, or not grouped.")],
+            [i18n("Fold up groups"), i18n("With grouping by app, groups without unread notifications are folded and show one or two lines (set the number, 0 for none).")],
             [i18n("Lines before \"Show more\""), i18n("How many lines of a long message are shown before it is folded.")],
+            [i18n("Card colours"), i18n("Tints each notification card and its edge bar by app: none, a colour from the app's name, or the main colour of its icon.")],
             [i18n("Relative times"), i18n("Show \"5 min ago\" instead of the clock time.")],
             [i18n("Mark as read on hover"), i18n("Notifications count as read once you hover the open panel.")],
             [i18n("Player"), i18n("Automatic plays the sound inside the widget and falls back to system commands; or use the system commands only.")],
@@ -3537,7 +4004,7 @@ KCM.SimpleKCM {
 
         Kirigami.Heading {
             level: 3
-            text: i18n("What's new in 2.4.0")
+            text: i18n("What's new in 2.6.0")
             Layout.topMargin: Kirigami.Units.largeSpacing
         }
         Kirigami.Separator { Layout.fillWidth: true }
@@ -3780,6 +4247,9 @@ ${b}Pre-selected settings${r}
   - The handle blinks a few times when a new notification arrives.
   - Notifications are grouped by application.
   - Plasma's own pop-ups stay on.
+  - Notification cards are tinted with the colour of each app's icon.
+  - Groups without unread notifications are folded up and show their newest
+    two notifications as one line each.
   - A history of notifications is kept for 30 days (history button at the top
     of the panel).
   - The icons of apps with unread notifications show on the handle (up to 5, then "+N").
@@ -3809,6 +4279,10 @@ ${b}Other options${r}  (right-click the handle, then Configure)
            notifications (and how many); custom colours; blink never,
            a few times, or until you open the panel.
   Readme   a short description of the app and of every option.
+  Groups   fold up groups without unread notifications, and how many lines
+           (0-2) of them stay visible.
+  Colours  tint each notification card by app: none, from the app's name,
+           or from the colour of its icon (the default).
   Sound    play a sound for a new notification (off by default): pick a
            built-in sound or your own file (browse dialog), the player
            (built into the widget, or system commands) and a warm-up.
