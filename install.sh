@@ -174,7 +174,7 @@ extract_package() {
         "Icon": "notification-active",
         "Category": "Utilities",
         "License": "GPL-2.0+",
-        "Version": "2.7.0",
+        "Version": "3.0.0",
         "Copyright": "Copyright © Mikroner",
         "Website": "https://github.com/mikroner/Plasma_Notification_SidePanel",
         "Authors": [
@@ -1044,6 +1044,36 @@ PlasmoidItem {
         return Qt.hsla((h % 360) / 360, 0.55, 0.5, 1).toString()
     }
 
+    // The colour found in an icon, made richer: more saturation and a bright, clean value,
+    // so the tint stays lively on light and dark themes (memoised, it is asked for a lot)
+    property var vividCache: ({})
+    function vivid(col) {
+        if (!col) {
+            return ""
+        }
+        const hit = vividCache[col]
+        if (hit) {
+            return hit
+        }
+        const c = Qt.color(col)
+        const out = Qt.hsva(c.hsvHue < 0 ? 0 : c.hsvHue,
+                            Math.min(1, Math.max(c.hsvSaturation * 1.3, 0.72)),
+                            Math.min(1, Math.max(c.hsvValue, 0.88)), 1).toString()
+        vividCache[col] = out
+        return out
+    }
+
+    // fill of an app's group card (a little stronger than before: 0.18 -> 0.22)
+    function groupFill(tint) {
+        return tint !== "" ? Qt.alpha(tint, 0.22) : Qt.alpha(Kirigami.Theme.textColor, 0.07)
+    }
+
+    // layout of the list: room around the cards, rounded corners
+    readonly property real groupMargin: Math.round(Kirigami.Units.largeSpacing * 1.5)   // panel edge -> card
+    readonly property real groupGap: Kirigami.Units.largeSpacing                         // card -> card
+    readonly property real groupRadius: Kirigami.Units.cornerRadius * 2
+    readonly property real groupPad: Math.round(Kirigami.Units.largeSpacing * 1.5)      // card edge -> text
+
     // "" = do not colour cards
     function appColorFor(appName, iconName) {
         const chosen = Plasmoid.configuration.cardColorMode
@@ -1055,7 +1085,7 @@ PlasmoidItem {
         if (mode === 2) {
             const found = iconColors[key]
             if (found) {
-                return found
+                return vivid(found)
             }
             if (found === undefined && !iconColorAsked[key] && pickerLoader.item && updater) {
                 iconColorAsked[key] = true
@@ -1063,7 +1093,7 @@ PlasmoidItem {
                 updater.findIcon(iconName || key)
             }
         }
-        return nameColor(key)
+        return vivid(nameColor(key))
     }
 
     // ---- sound on a new notification ------------------------------------------
@@ -1175,7 +1205,7 @@ PlasmoidItem {
 
     // After an install or update, open the settings once (on the Readme, its first page)
     // so the list of what is new is seen. Keep in step with metadata.json.
-    readonly property string releaseVersion: "2.7.0"
+    readonly property string releaseVersion: "3.0.0"
     Timer {
         id: readmeTimer
         interval: 4000
@@ -1677,8 +1707,8 @@ PlasmoidItem {
                     model: viewModel
                     clip: true
                     spacing: 0
-                    topMargin: Kirigami.Units.smallSpacing
-                    bottomMargin: Kirigami.Units.smallSpacing
+                    topMargin: 0
+                    bottomMargin: root.groupGap
                     keyNavigationEnabled: true
                     activeFocusOnTab: true
                     currentIndex: -1
@@ -1726,22 +1756,27 @@ PlasmoidItem {
                         readonly property bool byApp: list.groupMode === 1
                         readonly property bool isCollapsed: byApp && root.isGroupCollapsed(section)
 
-                        width: ListView.view.width
-                        height: headerRow.implicitHeight + Kirigami.Units.largeSpacing
+                        // grouped by app: the header is the top of the group's rounded card
+                        readonly property real headPad: Kirigami.Units.largeSpacing
+                        // a collapsed group without previews is the header alone, rounded all round
+                        readonly property bool alone: isCollapsed && Plasmoid.configuration.collapsedPreview <= 0
 
-                        // the app's colour, as for its cards but 20% stronger (0.15 -> 0.18)
+                        width: ListView.view.width
+                        height: byApp ? root.groupGap + headerRow.implicitHeight + headPad * 2
+                                      : headerRow.implicitHeight + Kirigami.Units.largeSpacing
+                        clip: true
+
                         readonly property string tint: byApp ? root.appColorFor(info.name, info.icon) : ""
 
                         Rectangle {
-                            visible: header.tint !== ""
-                            anchors {
-                                fill: parent
-                                leftMargin: Kirigami.Units.smallSpacing
-                                rightMargin: Kirigami.Units.smallSpacing
-                                topMargin: Kirigami.Units.smallSpacing / 2
-                            }
-                            radius: Kirigami.Units.cornerRadius
-                            color: header.tint !== "" ? Qt.alpha(header.tint, 0.18) : "transparent"
+                            visible: header.byApp
+                            x: root.groupMargin
+                            width: parent.width - root.groupMargin * 2
+                            y: root.groupGap
+                            // run past the bottom edge (clipped) so only the top corners are round
+                            height: parent.height - root.groupGap + (header.alone ? 0 : root.groupRadius)
+                            radius: root.groupRadius
+                            color: root.groupFill(header.tint)
                         }
 
                         TapHandler {
@@ -1754,8 +1789,9 @@ PlasmoidItem {
                             anchors {
                                 left: parent.left; right: parent.right
                                 bottom: parent.bottom
-                                leftMargin: Kirigami.Units.largeSpacing
-                                rightMargin: Kirigami.Units.smallSpacing
+                                bottomMargin: header.byApp ? header.headPad : 0
+                                leftMargin: root.groupMargin + root.groupPad
+                                rightMargin: root.groupMargin + Kirigami.Units.smallSpacing
                             }
                             spacing: Kirigami.Units.smallSpacing
 
@@ -1797,38 +1833,54 @@ PlasmoidItem {
 
                     delegate: Item {
                         id: wrapper
-                        readonly property bool isCollapsed: list.groupMode === 1 && root.isGroupCollapsed(model.appKey)
+                        readonly property bool byApp: list.groupMode === 1
+                        readonly property bool isCollapsed: byApp && root.isGroupCollapsed(model.appKey)
                         // a collapsed group still shows the newest one or two as a single line
                         readonly property bool showPreview: isCollapsed && model.rank < Plasmoid.configuration.collapsedPreview
                         // the line after the last preview: ". . . . . ." says there are more in the group
                         readonly property bool showMore: isCollapsed && Plasmoid.configuration.collapsedPreview > 0
                                                          && model.rank === Plasmoid.configuration.collapsedPreview
-                        readonly property int gutter: Kirigami.Units.smallSpacing
+                        // the last line of the group's card (its bottom corners are the rounded ones)
+                        readonly property int groupCount: (root.sectionInfo[model.appKey] || ({ count: 0 })).count
+                        readonly property bool isLast: byApp && (isCollapsed ? (showMore || (showPreview && model.rank === groupCount - 1))
+                                                                              : model.rank === groupCount - 1)
+                        readonly property string tint: root.appColorFor(model.appName, model.appIcon)
+                        // grouped cards touch (a hairline separates them); loose cards keep a gap
+                        readonly property real gutter: byApp ? 0 : root.groupGap
 
                         width: ListView.view.width
-                        height: isCollapsed ? (showPreview ? preview.height + gutter : (showMore ? moreCard.height + gutter : 0)) : card.height + gutter
+                        height: isCollapsed ? (showPreview ? preview.height : (showMore ? moreCard.height : 0))
+                                            : card.height + gutter
                         visible: height > 0.5
                         clip: true
 
-                        // the dots sit in a tinted card of their own, so they read as part of the group
+                        // this row's slice of the group's rounded card
                         Rectangle {
+                            visible: wrapper.byApp && wrapper.height > 0.5
+                            x: root.groupMargin
+                            width: parent.width - root.groupMargin * 2
+                            y: wrapper.isLast ? -root.groupRadius : 0
+                            height: parent.height + (wrapper.isLast ? root.groupRadius : 0)
+                            radius: wrapper.isLast ? root.groupRadius : 0
+                            color: root.groupFill(wrapper.tint)
+                        }
+
+                        // the thin line between two notifications of a group
+                        Rectangle {
+                            visible: wrapper.byApp && wrapper.height > 0.5
+                            x: root.groupMargin + root.groupPad
+                            width: parent.width - (root.groupMargin + root.groupPad) * 2
+                            y: 0
+                            height: 1
+                            color: Qt.alpha(Kirigami.Theme.textColor, 0.14)
+                        }
+
+                        Item {
                             id: moreCard
                             visible: wrapper.showMore
-                            x: wrapper.gutter
-                            width: wrapper.width - wrapper.gutter * 2
-                            height: moreLabel.implicitHeight + Kirigami.Units.smallSpacing
-                            radius: Kirigami.Units.cornerRadius
-                            readonly property string tint: root.appColorFor(model.appName, model.appIcon)
-                            color: tint !== "" ? Qt.alpha(tint, 0.15) : Qt.alpha(Kirigami.Theme.textColor, 0.06)
-
-                            Rectangle {
-                                visible: moreCard.tint !== ""
-                                anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
-                                width: 3
-                                radius: 1.5
-                                color: moreCard.tint
-                                opacity: 0.55
-                            }
+                            x: root.groupMargin
+                            width: wrapper.width - root.groupMargin * 2
+                            height: moreLabel.implicitHeight + Kirigami.Units.smallSpacing * 2
                             PlasmaComponents3.Label {
                                 id: moreLabel
                                 anchors.centerIn: parent
@@ -1840,31 +1892,19 @@ PlasmoidItem {
                             TapHandler { onTapped: root.setCollapsed(model.appKey, false) }
                         }
 
-                        Rectangle {
+                        Item {
                             id: preview
                             visible: wrapper.showPreview
-                            x: wrapper.gutter
-                            width: wrapper.width - wrapper.gutter * 2
-                            height: previewLabel.implicitHeight + Kirigami.Units.smallSpacing * 2
-                            radius: Kirigami.Units.cornerRadius
-                            readonly property string tint: root.appColorFor(model.appName, model.appIcon)
-                            color: tint !== "" ? Qt.alpha(tint, 0.15) : Qt.alpha(Kirigami.Theme.textColor, 0.06)
-
-                            Rectangle {
-                                visible: preview.tint !== ""
-                                anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
-                                width: 3
-                                radius: 1.5
-                                color: preview.tint
-                                opacity: 0.55
-                            }
+                            x: root.groupMargin
+                            width: wrapper.width - root.groupMargin * 2
+                            height: previewLabel.implicitHeight + Kirigami.Units.largeSpacing
                             PlasmaComponents3.Label {
                                 id: previewLabel
                                 anchors {
                                     left: parent.left; right: parent.right
                                     verticalCenter: parent.verticalCenter
-                                    leftMargin: Kirigami.Units.largeSpacing
-                                    rightMargin: Kirigami.Units.smallSpacing
+                                    leftMargin: root.groupPad
+                                    rightMargin: root.groupPad
                                 }
                                 text: root.oneLine(model.summary, model.body)
                                 textFormat: Text.StyledText
@@ -1885,8 +1925,9 @@ PlasmoidItem {
                         NotificationCard {
                             id: card
                             visible: !wrapper.isCollapsed
-                            x: wrapper.gutter
-                            width: wrapper.width - wrapper.gutter * 2
+                            x: root.groupMargin
+                            width: wrapper.width - root.groupMargin * 2
+                            grouped: wrapper.byApp
 
                             summary: model.summary
                             body: model.body
@@ -2375,6 +2416,7 @@ Item {
     property int bodyLines: 4
     property bool showAppName: true
     property bool isCurrent: false
+    property bool grouped: false          // drawn inside an app's group card, which supplies the background
 
     signal dismissed()
     signal defaultInvoked()
@@ -2395,9 +2437,11 @@ Item {
         return out
     }
 
-    readonly property real leftPad: Kirigami.Units.smallSpacing + 3
-    readonly property real rightPad: Kirigami.Units.smallSpacing
-    readonly property real vPad: Kirigami.Units.smallSpacing
+    // generous room between the text and the edge of the card (or group card)
+    readonly property real leftPad: Math.round(Kirigami.Units.largeSpacing * 1.5)
+    readonly property real rightPad: Math.round(Kirigami.Units.largeSpacing * 1.5)
+    readonly property real vPad: Kirigami.Units.largeSpacing - 1
+    readonly property real cornerR: Kirigami.Units.cornerRadius * 2
     readonly property bool showIcon: !!card.image || card.showAppName
 
     height: frame.height
@@ -2427,13 +2471,15 @@ Item {
         id: frame
         width: parent.width
         height: content.height + card.vPad * 2
-        radius: Kirigami.Units.cornerRadius
-        color: card.appColor !== ""
-               ? Qt.alpha(card.appColor, hover.hovered ? 0.26 : 0.15)
-               : hover.hovered
-                 ? Qt.alpha(Kirigami.Theme.highlightColor, 0.14)
-                 : Qt.alpha(Kirigami.Theme.textColor, 0.06)
-        border.width: card.isCurrent ? 2 : 0
+        radius: card.grouped ? 0 : card.cornerR
+        color: card.grouped
+               ? "transparent"
+               : card.appColor !== ""
+                 ? Qt.alpha(card.appColor, hover.hovered ? 0.30 : 0.20)
+                 : hover.hovered
+                   ? Qt.alpha(Kirigami.Theme.highlightColor, 0.14)
+                   : Qt.alpha(Kirigami.Theme.textColor, 0.06)
+        border.width: card.isCurrent && !card.grouped ? 2 : 0
         border.color: Kirigami.Theme.highlightColor
         opacity: 1 - Math.min(Math.abs(x) / (width * 0.9), 1)
 
@@ -2454,12 +2500,30 @@ Item {
             }
         }
 
+        // Inside a group card: a soft highlight for hover and keyboard focus, inset so it
+        // never pokes out of the group's rounded corners
+        Rectangle {
+            visible: card.grouped
+            anchors { fill: parent; margins: Kirigami.Units.smallSpacing / 2 }
+            radius: Kirigami.Units.cornerRadius
+            color: hover.hovered ? (card.appColor !== "" ? Qt.alpha(card.appColor, 0.16)
+                                                         : Qt.alpha(Kirigami.Theme.highlightColor, 0.14))
+                                 : "transparent"
+            border.width: card.isCurrent ? 2 : 0
+            border.color: Kirigami.Theme.highlightColor
+        }
+
         // Accent bar: red for critical, accent colour for unread
         Rectangle {
             // urgency values are flags in plasma-workspace: low=1, normal=2, critical=4
             readonly property bool critical: card.urgency >= 4
-            visible: critical || card.unread || card.appColor !== ""
-            anchors { left: parent.left; top: parent.top; bottom: parent.bottom }
+            visible: critical || card.unread || (!card.grouped && card.appColor !== "")
+            anchors {
+                left: parent.left; top: parent.top; bottom: parent.bottom
+                leftMargin: card.grouped ? Kirigami.Units.smallSpacing / 2 + 1 : 0
+                topMargin: card.grouped ? Kirigami.Units.smallSpacing + 2 : 0
+                bottomMargin: card.grouped ? Kirigami.Units.smallSpacing + 2 : 0
+            }
             width: 3
             radius: 1.5
             opacity: critical || card.unread ? 1 : 0.55
@@ -3944,6 +4008,9 @@ KCM.SimpleKCM {
     id: page
 
     readonly property var news: [
+        i18n("New look: with grouping by app, each app's notifications are one rounded card. The notifications inside touch each other and are told apart by a thin line."),
+        i18n("More room: more space between the text and the edges of the cards, between the cards, and between the cards and the edge of the panel."),
+        i18n("Richer colours: the colour taken from an app's icon is made more vivid, and the cards are tinted a little stronger."),
         i18n("Fixed: the \"Restart Plasma\" button after an online update now restarts Plasma reliably, the same way the installer does, and says so if it fails."),
         i18n("Folded groups: with grouping by app, groups without unread notifications fold up and show their newest one or two notifications as one line, followed by a line of dots when there are more; groups with unread notifications stay open. Both can be changed in General.")
     ]
@@ -4007,7 +4074,7 @@ KCM.SimpleKCM {
 
         Kirigami.Heading {
             level: 3
-            text: i18n("What's new in 2.7.0")
+            text: i18n("What's new in 3.0.0")
             Layout.topMargin: Kirigami.Units.largeSpacing
         }
         Kirigami.Separator { Layout.fillWidth: true }

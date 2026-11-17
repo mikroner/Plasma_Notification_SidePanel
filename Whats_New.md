@@ -7,6 +7,14 @@ Everything that changed in **Side Notification Panel**, newest first.
 
 ---
 
+## 3.0.0
+A visual release.
+- **One rounded card per app.** When notifications are grouped by application, the group is a single card with rounded corners. The notifications inside have no gaps between them; a thin line separates each from the next.
+- **More room.** The text has more space from the edges of the card, and the cards have more space from the edges of the panel and from each other.
+- **Richer colours.** The colour taken from an app's icon is made more vivid (more saturation, a clean brightness), and tints are slightly stronger, so groups stand out more on light and dark themes.
+- Unread notifications in a group get a short accent bar at the left; hovering a notification highlights it softly inside the group.
+- Nothing changes in your settings: the update keeps everything you chose.
+
 ## 2.7.0
 - Fixed: the **Restart Plasma** button after an online update did not restart Plasma on some systems. It now restarts Plasma the same way the installer does: through the systemd service if Plasma runs as one, otherwise by quitting and starting it again. If the restart fails, the panel now says so and shows the command to run.
 
